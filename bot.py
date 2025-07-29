@@ -28,6 +28,7 @@ class TradingMonitorBot:
         self.user_data = {}
         self.binance_client = None
         self.monitoring_tasks = {}
+        self.application = None
 
     async def init_clients(self, api_key=None, api_secret=None):
         """Initialize API clients"""
@@ -36,14 +37,16 @@ class TradingMonitorBot:
 
     async def cleanup(self):
         """Close connections properly"""
+        # Cancel all monitoring tasks
+        for user_id, task in self.monitoring_tasks.items():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        
         if self.binance_client:
             await self.binance_client.close_connection()
-        
-        # Cancel all monitoring tasks
-        for task in self.monitoring_tasks.values():
-            task.cancel()
-        await asyncio.gather(*self.monitoring_tasks.values(), return_exceptions=True)
-        self.monitoring_tasks.clear()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
@@ -190,7 +193,7 @@ class TradingMonitorBot:
             return
             
         self.user_data[user_id]['last_price'] = current_price
-        self.monitoring_tasks[user_id] = asyncio.create_task(self.monitor_price(user_id))
+        self.monitoring_tasks[user_id] = asyncio.create_task(self.monitor_price(user_id, context))
         
         await update.message.reply_text(
             f"🔍 مانیتورینگ {self.user_data[user_id]['coin']} شروع شد\n"
@@ -223,6 +226,10 @@ class TradingMonitorBot:
             
         user_data = self.user_data[user_id]
         monitoring_status = "فعال ✅" if user_data.get('monitoring', False) else "غیرفعال ❌"
+        monitoring_task = self.monitoring_tasks.get(user_id)
+        
+        if monitoring_task and not monitoring_task.done():
+            monitoring_status += " (در حال اجرا)"
         
         try:
             current_price = await self.get_current_price(user_id)
@@ -251,7 +258,7 @@ class TradingMonitorBot:
             logger.error(f"Error getting price for {user_id}: {e}")
             return None
 
-    async def monitor_price(self, user_id):
+    async def monitor_price(self, user_id, context):
         """Monitor price changes"""
         while self.user_data.get(user_id, {}).get('monitoring', False):
             try:
@@ -294,14 +301,17 @@ class TradingMonitorBot:
                 logger.error(f"Monitoring error for {user_id}: {e}")
                 await asyncio.sleep(300)
 
-async def run_bot():
-    """Run the bot with proper cleanup"""
-    application = Application.builder().token("7584437136:AAFVtfF9RjCyteONcz8DSg2F2CfhgQT2GcQ").build()
+async def main():
+    """Main function to run the bot"""
     bot_instance = TradingMonitorBot()
     
     try:
-        # Initialize Binance client (optional: add your API keys if needed)
+        # Initialize Binance client
         await bot_instance.init_clients()
+        
+        # Create Telegram application
+        application = Application.builder().token("7584437136:AAFVtfF9RjCyteONcz8DSg2F2CfhgQT2GcQ").build()
+        bot_instance.application = application
         
         # Add command handlers
         application.add_handler(CommandHandler("start", bot_instance.start))
@@ -331,14 +341,14 @@ async def run_bot():
     except asyncio.CancelledError:
         logger.info("Received cancellation signal")
     except Exception as e:
-        logger.error(f"Error in bot: {e}")
+        logger.error(f"Error in main: {e}")
     finally:
         await bot_instance.cleanup()
-        if 'application' in locals():
-            await application.shutdown()
+        if hasattr(bot_instance, 'application') and bot_instance.application:
+            await bot_instance.application.shutdown()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(run_bot())
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user")
