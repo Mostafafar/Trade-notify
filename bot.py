@@ -26,18 +26,24 @@ WAITING_COIN, WAITING_LEVERAGE, WAITING_ALLOCATION, WAITING_TARGET = range(4)
 class TradingMonitorBot:
     def __init__(self):
         self.user_data = {}
-        self.bot = None
         self.binance_client = None
+        self.monitoring_tasks = {}
 
-    async def init_clients(self):
+    async def init_clients(self, api_key=None, api_secret=None):
         """Initialize API clients"""
-        self.binance_client = await AsyncClient.create()
+        self.binance_client = await AsyncClient.create(api_key, api_secret)
         return self
 
     async def cleanup(self):
         """Close connections properly"""
         if self.binance_client:
             await self.binance_client.close_connection()
+        
+        # Cancel all monitoring tasks
+        for task in self.monitoring_tasks.values():
+            task.cancel()
+        await asyncio.gather(*self.monitoring_tasks.values(), return_exceptions=True)
+        self.monitoring_tasks.clear()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
@@ -49,7 +55,8 @@ class TradingMonitorBot:
             "/set_alloc - تنظیم درصد سرمایه\n"
             "/set_target - تنظیم درصد تغییر هدف\n"
             "/start_monitor - شروع مانیتورینگ\n"
-            "/stop_monitor - توقف مانیتورینگ",
+            "/stop_monitor - توقف مانیتورینگ\n"
+            "/status - نمایش وضعیت فعلی",
             parse_mode='Markdown'
         )
 
@@ -63,13 +70,15 @@ class TradingMonitorBot:
     async def process_coin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Process the coin input"""
         coin = update.message.text.upper()
-        self.user_data[update.effective_user.id] = {
-            'coin': f"{coin}USDT",
-            'leverage': 1,
-            'allocation': 100,
-            'target_change': 5,
-            'monitoring': False
-        }
+        if not coin.isalpha():
+            await update.message.reply_text("⚠️ لطفا فقط حروف انگلیسی وارد کنید (مثلا BTC)")
+            return WAITING_COIN
+            
+        user_id = update.effective_user.id
+        if user_id not in self.user_data:
+            self.user_data[user_id] = {}
+            
+        self.user_data[user_id]['coin'] = f"{coin}USDT"
         await update.message.reply_text(
             f"✅ ارز {coin} تنظیم شد\n"
             f"لطفا اهرم مورد نظر را با دستور /set_leverage تنظیم کنید"
@@ -79,7 +88,7 @@ class TradingMonitorBot:
     async def set_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Set the leverage"""
         await update.message.reply_text(
-            "لطفا مقدار اهرم را وارد کنید (مثلا 2 برای 2x):"
+            "لطفا مقدار اهرم را وارد کنید (بین 1 تا 125):"
         )
         return WAITING_LEVERAGE
 
@@ -89,7 +98,9 @@ class TradingMonitorBot:
             leverage = float(update.message.text)
             if leverage < 1 or leverage > 125:
                 raise ValueError
-            self.user_data[update.effective_user.id]['leverage'] = leverage
+                
+            user_id = update.effective_user.id
+            self.user_data[user_id]['leverage'] = leverage
             await update.message.reply_text(
                 f"✅ اهرم {leverage}x تنظیم شد\n"
                 f"لطفا درصد سرمایه اختصاص داده شده را با دستور /set_alloc تنظیم کنید"
@@ -104,7 +115,7 @@ class TradingMonitorBot:
     async def set_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Set the allocation percentage"""
         await update.message.reply_text(
-            "لطفا درصدی از سرمایه که می‌خواهید اختصاص دهید را وارد کنید (مثلا 50 برای 50%):"
+            "لطفا درصدی از سرمایه که می‌خواهید اختصاص دهید را وارد کنید (بین 0.1 تا 100):"
         )
         return WAITING_ALLOCATION
 
@@ -114,7 +125,9 @@ class TradingMonitorBot:
             alloc = float(update.message.text)
             if alloc <= 0 or alloc > 100:
                 raise ValueError
-            self.user_data[update.effective_user.id]['allocation'] = alloc
+                
+            user_id = update.effective_user.id
+            self.user_data[user_id]['allocation'] = alloc
             await update.message.reply_text(
                 f"✅ تخصیص {alloc}% تنظیم شد\n"
                 f"لطفا درصد تغییر مورد نظر را با دستور /set_target تنظیم کنید"
@@ -122,7 +135,7 @@ class TradingMonitorBot:
             return ConversationHandler.END
         except ValueError:
             await update.message.reply_text(
-                "⚠️ لطفا یک عدد معتبر بین 0 تا 100 وارد کنید"
+                "⚠️ لطفا یک عدد معتبر بین 0.1 تا 100 وارد کنید"
             )
             return WAITING_ALLOCATION
 
@@ -139,15 +152,17 @@ class TradingMonitorBot:
             target = float(update.message.text)
             if target <= 0:
                 raise ValueError
-            self.user_data[update.effective_user.id]['target_change'] = target
-            user_data = self.user_data[update.effective_user.id]
+                
+            user_id = update.effective_user.id
+            self.user_data[user_id]['target_change'] = target
+            user_data = self.user_data[user_id]
             
             await update.message.reply_text(
                 f"✅ تنظیمات کامل شد:\n\n"
                 f"🏷️ ارز: {user_data['coin']}\n"
-                f"📊 اهرم: {user_data['leverage']}x\n"
-                f"💰 تخصیص: {user_data['allocation']}%\n"
-                f"🎯 درصد تغییر هدف: {user_data['target_change']}%\n\n"
+                f"📊 اهرم: {user_data.get('leverage', 1)}x\n"
+                f"💰 تخصیص: {user_data.get('allocation', 100)}%\n"
+                f"🎯 درصد تغییر هدف: {user_data.get('target_change', 5)}%\n\n"
                 f"برای شروع مانیتورینگ از دستور /start_monitor استفاده کنید"
             )
             return ConversationHandler.END
@@ -160,30 +175,70 @@ class TradingMonitorBot:
     async def start_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start monitoring the price"""
         user_id = update.effective_user.id
-        if user_id not in self.user_data:
-            await update.message.reply_text(
-                "⚠️ لطفا ابتدا تنظیمات را کامل کنید"
-            )
+        if user_id not in self.user_data or 'coin' not in self.user_data[user_id]:
+            await update.message.reply_text("⚠️ لطفا ابتدا ارز را با دستور /set_coin تنظیم کنید")
             return
-        
+            
+        if user_id in self.monitoring_tasks and not self.monitoring_tasks[user_id].done():
+            await update.message.reply_text("ℹ️ مانیتورینگ از قبل فعال است")
+            return
+            
         self.user_data[user_id]['monitoring'] = True
-        self.user_data[user_id]['last_price'] = await self.get_current_price(user_id)
-        
-        asyncio.create_task(self.monitor_price(user_id))
+        current_price = await self.get_current_price(user_id)
+        if current_price is None:
+            await update.message.reply_text("⚠️ خطا در دریافت قیمت اولیه")
+            return
+            
+        self.user_data[user_id]['last_price'] = current_price
+        self.monitoring_tasks[user_id] = asyncio.create_task(self.monitor_price(user_id))
         
         await update.message.reply_text(
             f"🔍 مانیتورینگ {self.user_data[user_id]['coin']} شروع شد\n"
-            f"هر تغییر {self.user_data[user_id]['target_change']}% با اهرم {self.user_data[user_id]['leverage']}x به شما اطلاع داده می‌شود"
+            f"هر تغییر {self.user_data[user_id].get('target_change', 5)}% "
+            f"با اهرم {self.user_data[user_id].get('leverage', 1)}x به شما اطلاع داده می‌شود"
         )
 
     async def stop_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Stop monitoring the price"""
         user_id = update.effective_user.id
+        if user_id in self.monitoring_tasks:
+            self.monitoring_tasks[user_id].cancel()
+            try:
+                await self.monitoring_tasks[user_id]
+            except asyncio.CancelledError:
+                pass
+            del self.monitoring_tasks[user_id]
+            
         if user_id in self.user_data:
             self.user_data[user_id]['monitoring'] = False
-            await update.message.reply_text(
-                "⏹️ مانیتورینگ متوقف شد"
-            )
+            
+        await update.message.reply_text("⏹️ مانیتورینگ متوقف شد")
+
+    async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Show current status"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_data or 'coin' not in self.user_data[user_id]:
+            await update.message.reply_text("⚠️ هنوز تنظیماتی انجام نشده است")
+            return
+            
+        user_data = self.user_data[user_id]
+        monitoring_status = "فعال ✅" if user_data.get('monitoring', False) else "غیرفعال ❌"
+        
+        try:
+            current_price = await self.get_current_price(user_id)
+            price_info = f"قیمت فعلی: {current_price:.8f}"
+        except Exception:
+            price_info = "قیمت فعلی: نامعلوم"
+        
+        await update.message.reply_text(
+            f"📊 وضعیت فعلی:\n\n"
+            f"🏷️ ارز: {user_data['coin']}\n"
+            f"📊 اهرم: {user_data.get('leverage', 1)}x\n"
+            f"💰 تخصیص: {user_data.get('allocation', 100)}%\n"
+            f"🎯 درصد تغییر هدف: {user_data.get('target_change', 5)}%\n"
+            f"🔍 وضعیت مانیتورینگ: {monitoring_status}\n"
+            f"{price_info}"
+        )
 
     async def get_current_price(self, user_id):
         """Get current price of the coin"""
@@ -193,7 +248,7 @@ class TradingMonitorBot:
             )
             return float(ticker['price'])
         except Exception as e:
-            logger.error(f"Error getting price: {e}")
+            logger.error(f"Error getting price for {user_id}: {e}")
             return None
 
     async def monitor_price(self, user_id):
@@ -211,14 +266,15 @@ class TradingMonitorBot:
                     await asyncio.sleep(60)
                     continue
                 
-                leverage = self.user_data[user_id]['leverage']
+                leverage = self.user_data[user_id].get('leverage', 1)
                 change = ((current_price - last_price) / last_price) * 100 * leverage
+                target_change = self.user_data[user_id].get('target_change', 5)
                 
-                if abs(change) >= self.user_data[user_id]['target_change']:
+                if abs(change) >= target_change:
                     direction = "📈 افزایش" if change > 0 else "📉 کاهش"
-                    allocation = self.user_data[user_id]['allocation']
+                    allocation = self.user_data[user_id].get('allocation', 100)
                     
-                    await self.bot.send_message(
+                    await context.bot.send_message(
                         chat_id=user_id,
                         text=(
                             f"🚨 اعلان تغییر قیمت با اهرم 🚨\n\n"
@@ -232,45 +288,57 @@ class TradingMonitorBot:
                     self.user_data[user_id]['last_price'] = current_price
                 
                 await asyncio.sleep(60)  # Check every minute
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                logger.error(f"Monitoring error: {e}")
+                logger.error(f"Monitoring error for {user_id}: {e}")
                 await asyncio.sleep(300)
 
-async def main():
-    """Start the bot."""
-    # Create the Application
+async def run_bot():
+    """Run the bot with proper cleanup"""
     application = Application.builder().token("7584437136:AAFVtfF9RjCyteONcz8DSg2F2CfhgQT2GcQ").build()
-    
     bot_instance = TradingMonitorBot()
-    await bot_instance.init_clients()
-    bot_instance.bot = application.bot
-
-    # Add command handlers
-    application.add_handler(CommandHandler("start", bot_instance.start))
-    application.add_handler(CommandHandler("set_leverage", bot_instance.set_leverage))
-    application.add_handler(CommandHandler("set_alloc", bot_instance.set_allocation))
-    application.add_handler(CommandHandler("set_target", bot_instance.set_target))
-    application.add_handler(CommandHandler("start_monitor", bot_instance.start_monitor))
-    application.add_handler(CommandHandler("stop_monitor", bot_instance.stop_monitor))
-
-    # Add conversation handlers
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler('set_coin', bot_instance.set_coin)],
-        states={
-            WAITING_COIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_coin)],
-            WAITING_LEVERAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_leverage)],
-            WAITING_ALLOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_allocation)],
-            WAITING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_target)],
-        },
-        fallbacks=[]
-    )
-    application.add_handler(conv_handler)
-
-    # Run the bot
+    
     try:
+        # Initialize Binance client (optional: add your API keys if needed)
+        await bot_instance.init_clients()
+        
+        # Add command handlers
+        application.add_handler(CommandHandler("start", bot_instance.start))
+        application.add_handler(CommandHandler("status", bot_instance.status))
+        application.add_handler(CommandHandler("set_leverage", bot_instance.set_leverage))
+        application.add_handler(CommandHandler("set_alloc", bot_instance.set_allocation))
+        application.add_handler(CommandHandler("set_target", bot_instance.set_target))
+        application.add_handler(CommandHandler("start_monitor", bot_instance.start_monitor))
+        application.add_handler(CommandHandler("stop_monitor", bot_instance.stop_monitor))
+
+        # Add conversation handler
+        conv_handler = ConversationHandler(
+            entry_points=[CommandHandler('set_coin', bot_instance.set_coin)],
+            states={
+                WAITING_COIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_coin)],
+                WAITING_LEVERAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_leverage)],
+                WAITING_ALLOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_allocation)],
+                WAITING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_target)],
+            },
+            fallbacks=[]
+        )
+        application.add_handler(conv_handler)
+
+        # Run the bot
         await application.run_polling()
+        
+    except asyncio.CancelledError:
+        logger.info("Received cancellation signal")
+    except Exception as e:
+        logger.error(f"Error in bot: {e}")
     finally:
         await bot_instance.cleanup()
+        if 'application' in locals():
+            await application.shutdown()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(run_bot())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user")
