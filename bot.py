@@ -1,8 +1,16 @@
 import asyncio
-from binance.client import AsyncClient
-from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from binance import AsyncClient
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    ConversationHandler
+)
 import logging
+import warnings
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -10,6 +18,10 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# حالت‌های گفتگو
+WAITING_COIN, WAITING_LEVERAGE, WAITING_ALLOCATION, WAITING_TARGET = range(4)
 
 class TradingMonitorBot:
     def __init__(self):
@@ -20,6 +32,12 @@ class TradingMonitorBot:
     async def init_clients(self):
         """Initialize API clients"""
         self.binance_client = await AsyncClient.create()
+        return self
+
+    async def cleanup(self):
+        """Close connections properly"""
+        if self.binance_client:
+            await self.binance_client.close_connection()
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
@@ -40,7 +58,7 @@ class TradingMonitorBot:
         await update.message.reply_text(
             "لطفا نماد ارز مورد نظر را وارد کنید (مثلا BTC یا ETH):"
         )
-        return 'WAITING_COIN'
+        return WAITING_COIN
 
     async def process_coin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Process the coin input"""
@@ -56,14 +74,14 @@ class TradingMonitorBot:
             f"✅ ارز {coin} تنظیم شد\n"
             f"لطفا اهرم مورد نظر را با دستور /set_leverage تنظیم کنید"
         )
-        return -1
+        return ConversationHandler.END
 
     async def set_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Set the leverage"""
         await update.message.reply_text(
             "لطفا مقدار اهرم را وارد کنید (مثلا 2 برای 2x):"
         )
-        return 'WAITING_LEVERAGE'
+        return WAITING_LEVERAGE
 
     async def process_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Process the leverage input"""
@@ -76,19 +94,19 @@ class TradingMonitorBot:
                 f"✅ اهرم {leverage}x تنظیم شد\n"
                 f"لطفا درصد سرمایه اختصاص داده شده را با دستور /set_alloc تنظیم کنید"
             )
-            return -1
+            return ConversationHandler.END
         except ValueError:
             await update.message.reply_text(
                 "⚠️ لطفا یک عدد معتبر بین 1 تا 125 وارد کنید"
             )
-            return 'WAITING_LEVERAGE'
+            return WAITING_LEVERAGE
 
     async def set_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Set the allocation percentage"""
         await update.message.reply_text(
             "لطفا درصدی از سرمایه که می‌خواهید اختصاص دهید را وارد کنید (مثلا 50 برای 50%):"
         )
-        return 'WAITING_ALLOCATION'
+        return WAITING_ALLOCATION
 
     async def process_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Process the allocation input"""
@@ -101,19 +119,19 @@ class TradingMonitorBot:
                 f"✅ تخصیص {alloc}% تنظیم شد\n"
                 f"لطفا درصد تغییر مورد نظر را با دستور /set_target تنظیم کنید"
             )
-            return -1
+            return ConversationHandler.END
         except ValueError:
             await update.message.reply_text(
                 "⚠️ لطفا یک عدد معتبر بین 0 تا 100 وارد کنید"
             )
-            return 'WAITING_ALLOCATION'
+            return WAITING_ALLOCATION
 
     async def set_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Set the target percentage change"""
         await update.message.reply_text(
             "لطفا درصد تغییر مورد نظر برای اعلان را وارد کنید (مثلا 5 برای 5%):"
         )
-        return 'WAITING_TARGET'
+        return WAITING_TARGET
 
     async def process_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Process the target input"""
@@ -132,12 +150,12 @@ class TradingMonitorBot:
                 f"🎯 درصد تغییر هدف: {user_data['target_change']}%\n\n"
                 f"برای شروع مانیتورینگ از دستور /start_monitor استفاده کنید"
             )
-            return -1
+            return ConversationHandler.END
         except ValueError:
             await update.message.reply_text(
                 "⚠️ لطفا یک عدد معتبر بزرگتر از 0 وارد کنید"
             )
-            return 'WAITING_TARGET'
+            return WAITING_TARGET
 
     async def start_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start monitoring the price"""
@@ -218,48 +236,41 @@ class TradingMonitorBot:
                 logger.error(f"Monitoring error: {e}")
                 await asyncio.sleep(300)
 
-def main():
+async def main():
     """Start the bot."""
     # Create the Application
     application = Application.builder().token("7584437136:AAFVtfF9RjCyteONcz8DSg2F2CfhgQT2GcQ").build()
     
     bot_instance = TradingMonitorBot()
-    asyncio.get_event_loop().run_until_complete(bot_instance.init_clients())
+    await bot_instance.init_clients()
     bot_instance.bot = application.bot
 
-    # Add handlers
+    # Add command handlers
     application.add_handler(CommandHandler("start", bot_instance.start))
-    application.add_handler(CommandHandler("set_coin", bot_instance.set_coin))
     application.add_handler(CommandHandler("set_leverage", bot_instance.set_leverage))
     application.add_handler(CommandHandler("set_alloc", bot_instance.set_allocation))
     application.add_handler(CommandHandler("set_target", bot_instance.set_target))
     application.add_handler(CommandHandler("start_monitor", bot_instance.start_monitor))
     application.add_handler(CommandHandler("stop_monitor", bot_instance.stop_monitor))
-    
-    # Conversation handlers
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        bot_instance.process_coin,
-        pattern='WAITING_COIN'
-    ))
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        bot_instance.process_leverage,
-        pattern='WAITING_LEVERAGE'
-    ))
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        bot_instance.process_allocation,
-        pattern='WAITING_ALLOCATION'
-    ))
-    application.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND,
-        bot_instance.process_target,
-        pattern='WAITING_TARGET'
-    ))
+
+    # Add conversation handlers
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler('set_coin', bot_instance.set_coin)],
+        states={
+            WAITING_COIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_coin)],
+            WAITING_LEVERAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_leverage)],
+            WAITING_ALLOCATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_allocation)],
+            WAITING_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, bot_instance.process_target)],
+        },
+        fallbacks=[]
+    )
+    application.add_handler(conv_handler)
 
     # Run the bot
-    application.run_polling()
+    try:
+        await application.run_polling()
+    finally:
+        await bot_instance.cleanup()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
