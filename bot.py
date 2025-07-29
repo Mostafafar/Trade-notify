@@ -1,208 +1,264 @@
-import os
 import asyncio
-import logging
-from datetime import datetime
-from weexsdk import WeexSDK
+from binance.client import AsyncClient
 from telegram import Bot, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+import logging
 
-# Configure logging
+# تنظیمات لاگ
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-class WeexTradingBot:
+class TradingMonitorBot:
     def __init__(self):
-        # Get config from environment variables
-        self.weex_api_key = os.getenv('WEEX_API_KEY')
-        self.weex_api_secret = os.getenv('WEEX_API_SECRET')
-        self.telegram_token = os.getenv('TELEGRAM_TOKEN')
-        self.admin_chat_id = os.getenv('ADMIN_CHAT_ID')
-        
-        # Initialize clients
-        self.weex = WeexSDK(api_key=self.weex_api_key, api_secret=self.weex_api_secret)
-        self.tg_bot = Bot(token=self.telegram_token)
-        
-        # Trading parameters
-        self.leverage = 2
-        self.base_size = 100  # USDT
-        self.profit_target = 0.05  # 5%
-        self.cascade_target = 0.10  # 10%
-        self.stop_loss = 0.10  # 10%
-        
-        # State tracking
-        self.coins = []
-        self.positions = {}
-        self.cascade_levels = {}
+        self.user_data = {}
+        self.bot = None
+        self.binance_client = None
 
-    async def send_message(self, text: str):
-        """Send formatted Telegram message"""
+    async def init_clients(self):
+        """Initialize API clients"""
+        self.binance_client = await AsyncClient.create()
+
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Send welcome message"""
+        await update.message.reply_text(
+            "👋 **ربات مانیتورینگ معاملات با اهرم**\n\n"
+            "لطفا یکی از دستورات زیر را انتخاب کنید:\n"
+            "/set_coin - تنظیم ارز مورد نظر\n"
+            "/set_leverage - تنظیم اهرم\n"
+            "/set_alloc - تنظیم درصد سرمایه\n"
+            "/set_target - تنظیم درصد تغییر هدف\n"
+            "/start_monitor - شروع مانیتورینگ\n"
+            "/stop_monitor - توقف مانیتورینگ",
+            parse_mode='Markdown'
+        )
+
+    async def set_coin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set the cryptocurrency to monitor"""
+        await update.message.reply_text(
+            "لطفا نماد ارز مورد نظر را وارد کنید (مثلا BTC یا ETH):"
+        )
+        return 'WAITING_COIN'
+
+    async def process_coin(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process the coin input"""
+        coin = update.message.text.upper()
+        self.user_data[update.effective_user.id] = {
+            'coin': f"{coin}USDT",
+            'leverage': 1,
+            'allocation': 100,
+            'target_change': 5,
+            'monitoring': False
+        }
+        await update.message.reply_text(
+            f"✅ ارز {coin} تنظیم شد\n"
+            f"لطفا اهرم مورد نظر را با دستور /set_leverage تنظیم کنید"
+        )
+        return -1
+
+    async def set_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set the leverage"""
+        await update.message.reply_text(
+            "لطفا مقدار اهرم را وارد کنید (مثلا 2 برای 2x):"
+        )
+        return 'WAITING_LEVERAGE'
+
+    async def process_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process the leverage input"""
         try:
-            await self.tg_bot.send_message(
-                chat_id=self.admin_chat_id,
-                text=text,
-                parse_mode='Markdown'
+            leverage = float(update.message.text)
+            if leverage < 1 or leverage > 125:
+                raise ValueError
+            self.user_data[update.effective_user.id]['leverage'] = leverage
+            await update.message.reply_text(
+                f"✅ اهرم {leverage}x تنظیم شد\n"
+                f"لطفا درصد سرمایه اختصاص داده شده را با دستور /set_alloc تنظیم کنید"
             )
-        except Exception as e:
-            logger.error(f"Telegram send failed: {e}")
+            return -1
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ لطفا یک عدد معتبر بین 1 تا 125 وارد کنید"
+            )
+            return 'WAITING_LEVERAGE'
 
-    async def monitor_positions(self):
-        """Main monitoring loop"""
-        while True:
+    async def set_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set the allocation percentage"""
+        await update.message.reply_text(
+            "لطفا درصدی از سرمایه که می‌خواهید اختصاص دهید را وارد کنید (مثلا 50 برای 50%):"
+        )
+        return 'WAITING_ALLOCATION'
+
+    async def process_allocation(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process the allocation input"""
+        try:
+            alloc = float(update.message.text)
+            if alloc <= 0 or alloc > 100:
+                raise ValueError
+            self.user_data[update.effective_user.id]['allocation'] = alloc
+            await update.message.reply_text(
+                f"✅ تخصیص {alloc}% تنظیم شد\n"
+                f"لطفا درصد تغییر مورد نظر را با دستور /set_target تنظیم کنید"
+            )
+            return -1
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ لطفا یک عدد معتبر بین 0 تا 100 وارد کنید"
+            )
+            return 'WAITING_ALLOCATION'
+
+    async def set_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set the target percentage change"""
+        await update.message.reply_text(
+            "لطفا درصد تغییر مورد نظر برای اعلان را وارد کنید (مثلا 5 برای 5%):"
+        )
+        return 'WAITING_TARGET'
+
+    async def process_target(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Process the target input"""
+        try:
+            target = float(update.message.text)
+            if target <= 0:
+                raise ValueError
+            self.user_data[update.effective_user.id]['target_change'] = target
+            user_data = self.user_data[update.effective_user.id]
+            
+            await update.message.reply_text(
+                f"✅ تنظیمات کامل شد:\n\n"
+                f"🏷️ ارز: {user_data['coin']}\n"
+                f"📊 اهرم: {user_data['leverage']}x\n"
+                f"💰 تخصیص: {user_data['allocation']}%\n"
+                f"🎯 درصد تغییر هدف: {user_data['target_change']}%\n\n"
+                f"برای شروع مانیتورینگ از دستور /start_monitor استفاده کنید"
+            )
+            return -1
+        except ValueError:
+            await update.message.reply_text(
+                "⚠️ لطفا یک عدد معتبر بزرگتر از 0 وارد کنید"
+            )
+            return 'WAITING_TARGET'
+
+    async def start_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Start monitoring the price"""
+        user_id = update.effective_user.id
+        if user_id not in self.user_data:
+            await update.message.reply_text(
+                "⚠️ لطفا ابتدا تنظیمات را کامل کنید"
+            )
+            return
+        
+        self.user_data[user_id]['monitoring'] = True
+        self.user_data[user_id]['last_price'] = await self.get_current_price(user_id)
+        
+        asyncio.create_task(self.monitor_price(user_id))
+        
+        await update.message.reply_text(
+            f"🔍 مانیتورینگ {self.user_data[user_id]['coin']} شروع شد\n"
+            f"هر تغییر {self.user_data[user_id]['target_change']}% با اهرم {self.user_data[user_id]['leverage']}x به شما اطلاع داده می‌شود"
+        )
+
+    async def stop_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Stop monitoring the price"""
+        user_id = update.effective_user.id
+        if user_id in self.user_data:
+            self.user_data[user_id]['monitoring'] = False
+            await update.message.reply_text(
+                "⏹️ مانیتورینگ متوقف شد"
+            )
+
+    async def get_current_price(self, user_id):
+        """Get current price of the coin"""
+        try:
+            ticker = await self.binance_client.get_symbol_ticker(
+                symbol=self.user_data[user_id]['coin']
+            )
+            return float(ticker['price'])
+        except Exception as e:
+            logger.error(f"Error getting price: {e}")
+            return None
+
+    async def monitor_price(self, user_id):
+        """Monitor price changes"""
+        while self.user_data.get(user_id, {}).get('monitoring', False):
             try:
-                for coin in self.coins:
-                    await self.check_coin(coin)
+                current_price = await self.get_current_price(user_id)
+                if current_price is None:
+                    await asyncio.sleep(60)
+                    continue
+                
+                last_price = self.user_data[user_id].get('last_price')
+                if last_price is None:
+                    self.user_data[user_id]['last_price'] = current_price
+                    await asyncio.sleep(60)
+                    continue
+                
+                leverage = self.user_data[user_id]['leverage']
+                change = ((current_price - last_price) / last_price) * 100 * leverage
+                
+                if abs(change) >= self.user_data[user_id]['target_change']:
+                    direction = "📈 افزایش" if change > 0 else "📉 کاهش"
+                    allocation = self.user_data[user_id]['allocation']
+                    
+                    await self.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            f"🚨 اعلان تغییر قیمت با اهرم 🚨\n\n"
+                            f"🏷️ ارز: {self.user_data[user_id]['coin']}\n"
+                            f"{direction} {abs(change):.2f}% (با اهرم {leverage}x)\n"
+                            f"💰 تخصیص سرمایه: {allocation}%\n\n"
+                            f"قیمت قبلی: {last_price:.8f}\n"
+                            f"قیمت فعلی: {current_price:.8f}"
+                        )
+                    )
+                    self.user_data[user_id]['last_price'] = current_price
+                
                 await asyncio.sleep(60)  # Check every minute
             except Exception as e:
                 logger.error(f"Monitoring error: {e}")
                 await asyncio.sleep(300)
 
-    async def check_coin(self, coin: str):
-        """Check single coin's position"""
-        try:
-            ticker = self.weex.get_ticker(symbol=f"{coin}USDT")
-            price = float(ticker['last_price'])
-            
-            if coin in self.positions:
-                pos = self.positions[coin]
-                entry = pos['entry_price']
-                pnl = (entry - price)/entry if pos['type'] == 'short' else (price - entry)/entry
-                
-                if pnl >= self.profit_target and coin not in self.cascade_levels:
-                    await self.handle_profit(coin, "initial")
-                elif pnl >= self.cascade_target and coin in self.cascade_levels:
-                    await self.handle_profit(coin, "cascade")
-                elif pnl <= -self.stop_loss:
-                    await self.handle_loss(coin)
-                    
-        except Exception as e:
-            logger.error(f"Coin check failed for {coin}: {e}")
-
-    async def handle_profit(self, coin: str, level: str):
-        """Handle profit target hit"""
-        try:
-            idx = self.coins.index(coin)
-            if idx + 1 < len(self.coins):
-                next_coin = self.coins[idx + 1]
-                price = self.get_price(next_coin)
-                
-                await self.place_order(
-                    symbol=f"{next_coin}USDT",
-                    side="sell",
-                    quantity=self.base_size * self.leverage / price
-                )
-                
-                self.cascade_levels[coin] = level
-                msg = (
-                    f"🎯 *{coin} hit {5 if level=='initial' else 10}% profit!*\n\n"
-                    f"⚡ Opening short on {next_coin} at {self.leverage}x"
-                )
-                await self.send_message(msg)
-                
-        except Exception as e:
-            logger.error(f"Profit handling failed: {e}")
-
-    async def handle_loss(self, coin: str):
-        """Handle stop loss"""
-        try:
-            if coin in self.cascade_levels:
-                pos = self.positions[coin]
-                close_size = pos['size'] * 0.5
-                
-                await self.place_order(
-                    symbol=f"{coin}USDT",
-                    side="buy" if pos['type'] == 'short' else "sell",
-                    quantity=close_size
-                )
-                
-                self.positions[coin]['size'] *= 0.5
-                await self.send_message(
-                    f"⚠️ *Stop Loss Triggered!*\n\n"
-                    f"📉 {coin} dropped 10%, closed 50% position"
-                )
-                
-        except Exception as e:
-            logger.error(f"Loss handling failed: {e}")
-
-    async def place_order(self, symbol: str, side: str, quantity: float):
-        """Place order on WEEX"""
-        try:
-            return self.weex.create_order(
-                symbol=symbol,
-                side=side,
-                type="market",
-                quantity=quantity,
-                leverage=self.leverage
-            )
-        except Exception as e:
-            logger.error(f"Order failed: {e}")
-            return None
-
-    def get_price(self, coin: str) -> float:
-        """Get current price"""
-        ticker = self.weex.get_ticker(symbol=f"{coin}USDT")
-        return float(ticker['last_price'])
-
-# Telegram handlers
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🚀 *WEEX Trading Bot*\n\n"
-        "Send 3 coin symbols to start (e.g. `PEPE FLOKI SHIBA`)",
-        parse_mode='Markdown'
-    )
-
-async def handle_coins(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        coins = update.message.text.upper().split()
-        if len(coins) != 3:
-            await update.message.reply_text("Please send exactly 3 coin symbols")
-            return
-            
-        bot = context.bot_data.setdefault('trading_bot', WeexTradingBot())
-        bot.coins = coins
-        
-        # Open initial position
-        first_coin = coins[0]
-        price = bot.get_price(first_coin)
-        await bot.place_order(
-            symbol=f"{first_coin}USDT",
-            side="sell",
-            quantity=bot.base_size * bot.leverage / price
-        )
-        
-        bot.positions[first_coin] = {
-            'entry_price': price,
-            'size': bot.base_size * bot.leverage / price,
-            'type': 'short'
-        }
-        
-        await bot.send_message(
-            f"🎬 *Strategy Started!*\n\n"
-            f"First position: {first_coin} short at ${price:.8f}\n"
-            f"Next target: {coins[1]} at 5% profit"
-        )
-        
-        # Start monitoring
-        asyncio.create_task(bot.monitor_positions())
-        
-    except Exception as e:
-        logger.error(f"Coin setup failed: {e}")
-        await update.message.reply_text("Error starting strategy")
-
 def main():
-    # Verify environment variables
-    required_vars = ['WEEX_API_KEY', 'WEEX_API_SECRET', 'TELEGRAM_TOKEN', 'ADMIN_CHAT_ID']
-    for var in required_vars:
-        if var not in os.environ:
-            logger.error(f"Missing environment variable: {var}")
-            return
+    """Start the bot."""
+    # Create the Application
+    application = Application.builder().token("7584437136:AAFVtfF9RjCyteONcz8DSg2F2CfhgQT2GcQ").build()
     
-    # Start bot
-    application = Application.builder().token(os.getenv('8000378956:AAGfDy2R8tcUR_LcOTEfgTv8fAca512IgJ8')).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_coins))
+    bot_instance = TradingMonitorBot()
+    asyncio.get_event_loop().run_until_complete(bot_instance.init_clients())
+    bot_instance.bot = application.bot
+
+    # Add handlers
+    application.add_handler(CommandHandler("start", bot_instance.start))
+    application.add_handler(CommandHandler("set_coin", bot_instance.set_coin))
+    application.add_handler(CommandHandler("set_leverage", bot_instance.set_leverage))
+    application.add_handler(CommandHandler("set_alloc", bot_instance.set_allocation))
+    application.add_handler(CommandHandler("set_target", bot_instance.set_target))
+    application.add_handler(CommandHandler("start_monitor", bot_instance.start_monitor))
+    application.add_handler(CommandHandler("stop_monitor", bot_instance.stop_monitor))
+    
+    # Conversation handlers
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        bot_instance.process_coin,
+        pattern='WAITING_COIN'
+    ))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        bot_instance.process_leverage,
+        pattern='WAITING_LEVERAGE'
+    ))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        bot_instance.process_allocation,
+        pattern='WAITING_ALLOCATION'
+    ))
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        bot_instance.process_target,
+        pattern='WAITING_TARGET'
+    ))
+
+    # Run the bot
     application.run_polling()
 
 if __name__ == "__main__":
