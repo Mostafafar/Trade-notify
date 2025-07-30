@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 class TradingMonitorBot:
     def __init__(self):
         self.binance_client = None
-        self.bot = None
+        self.application = None
         self.monitoring_tasks = {}
 
     async def init_clients(self):
@@ -150,7 +150,7 @@ class TradingMonitorBot:
                 
                 if abs(change) >= context.user_data['target_change']:
                     direction = "📈 افزایش" if change > 0 else "📉 کاهش"
-                    await self.bot.send_message(
+                    await context.bot.send_message(
                         chat_id=user_id,
                         text=(
                             f"🚨 اعلان تغییر قیمت 🚨\n\n"
@@ -208,13 +208,13 @@ class TradingMonitorBot:
         else:
             await update.message.reply_text("⚠️ مانیتورینگ فعالی وجود ندارد")
 
-async def main():
-    """Main application"""
+async def run_bot():
+    """Run the bot with proper event loop management"""
     monitor_bot = TradingMonitorBot()
     await monitor_bot.init_clients()
     
     application = Application.builder().token("8000378956:AAGfDy2R8tcUR_LcOTEfgTv8fAca512IgJ8").build()
-    monitor_bot.bot = application.bot
+    monitor_bot.application = application
 
     # Add handlers
     application.add_handler(CommandHandler("start", monitor_bot.start))
@@ -227,21 +227,49 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, monitor_bot.handle_message))
 
     try:
-        await application.run_polling()
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        
+        logger.info("بات با موفقیت شروع به کار کرد")
+        while True:
+            await asyncio.sleep(3600)
+            
+    except asyncio.CancelledError:
+        logger.info("دریافت سیگنال توقف...")
     except Exception as e:
         logger.error(f"خطای شدید: {e}", exc_info=True)
     finally:
         logger.info("در حال خاموش کردن ربات...")
-        if monitor_bot.binance_client:
+        if hasattr(monitor_bot, 'application') and monitor_bot.application:
+            await monitor_bot.application.stop()
+            await monitor_bot.application.shutdown()
+        if hasattr(monitor_bot, 'binance_client') and monitor_bot.binance_client:
             await monitor_bot.binance_client.close_connection()
         logger.info("ربات خاموش شد")
 
-if __name__ == "__main__":
-    # Ensure only one event loop runs
+def main():
+    """Main entry point that properly handles the event loop"""
     try:
-        asyncio.run(main())
-    except RuntimeError as e:
-        if "Cannot close a running event loop" in str(e):
-            logger.error("خطا: یک حلقه رویداد در حال اجراست. لطفاً پروسه‌های قبلی را ببندید.")
-        else:
-            raise e
+        # Create a new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Run the bot
+        loop.run_until_complete(run_bot())
+    except KeyboardInterrupt:
+        logger.info("دریافت سیگنال قطع (Ctrl+C)...")
+    except Exception as e:
+        logger.error(f"خطای غیرمنتظره: {e}", exc_info=True)
+    finally:
+        # Cleanup
+        tasks = asyncio.all_tasks(loop=loop)
+        for task in tasks:
+            task.cancel()
+        
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
+        logger.info("حلقه رویداد بسته شد")
+
+if __name__ == "__main__":
+    main()
