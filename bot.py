@@ -72,7 +72,6 @@ class TradingMonitorBot:
 
     async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle all text messages"""
-        user_id = update.effective_user.id
         if 'waiting_for' not in context.user_data:
             await update.message.reply_text("⚠️ لطفاً از دستورات استفاده کنید")
             return
@@ -228,15 +227,21 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, monitor_bot.handle_message))
 
     try:
-        await application.run_polling(allowed_updates=Update.ALL_TYPES)
+        await application.run_polling()
     except Exception as e:
         logger.error(f"خطای شدید: {e}", exc_info=True)
     finally:
         logger.info("در حال خاموش کردن ربات...")
-        await application.shutdown()
         if monitor_bot.binance_client:
             await monitor_bot.binance_client.close_connection()
         logger.info("ربات خاموش شد")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Ensure only one event loop runs
+    try:
+        asyncio.run(main())
+    except RuntimeError as e:
+        if "Cannot close a running event loop" in str(e):
+            logger.error("خطا: یک حلقه رویداد در حال اجراست. لطفاً پروسه‌های قبلی را ببندید.")
+        else:
+            raise e
