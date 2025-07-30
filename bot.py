@@ -11,6 +11,7 @@ from telegram.ext import (
 )
 import logging
 import warnings
+from typing import Dict, Optional
 
 # Configure logging
 logging.basicConfig(
@@ -25,12 +26,12 @@ WAITING_COIN, WAITING_LEVERAGE, WAITING_ALLOCATION, WAITING_TARGET = range(4)
 
 class TradingMonitorBot:
     def __init__(self):
-        self.user_data = {}
-        self.binance_client = None
-        self.monitoring_tasks = {}
-        self.application = None
-        self.running = False
-        self._polling_task = None
+        self.user_data: Dict[int, dict] = {}
+        self.binance_client: Optional[AsyncClient] = None
+        self.monitoring_tasks: Dict[int, asyncio.Task] = {}
+        self.application: Optional[Application] = None
+        self._should_stop = asyncio.Event()
+        self._polling_task: Optional[asyncio.Task] = None
 
     async def init_clients(self, api_key=None, api_secret=None):
         """Initialize API clients"""
@@ -39,26 +40,20 @@ class TradingMonitorBot:
 
     async def cleanup(self):
         """Cleanup resources properly"""
-        self.running = False
-        
         # Cancel all monitoring tasks
         for user_id, task in self.monitoring_tasks.items():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         self.monitoring_tasks.clear()
         
+        # Close Binance client
         if self.binance_client:
             await self.binance_client.close_connection()
-        
-        if self._polling_task and not self._polling_task.done():
-            self._polling_task.cancel()
-            try:
-                await self._polling_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            self.binance_client = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
@@ -294,10 +289,13 @@ class TradingMonitorBot:
                 logger.error(f"Monitor error for {user_id}: {e}")
                 await asyncio.sleep(300)
 
+    async def shutdown(self):
+        """Initiate shutdown"""
+        self._should_stop.set()
+
 async def run_bot():
     """Run the bot with proper resource management"""
     bot = TradingMonitorBot()
-    bot.running = True
     
     try:
         # Initialize clients
@@ -329,24 +327,24 @@ async def run_bot():
         )
         application.add_handler(conv_handler)
 
-        # Run polling
+        # Run polling in background
         bot._polling_task = asyncio.create_task(application.run_polling())
         
-        # Keep bot running
-        while bot.running:
-            await asyncio.sleep(1)
-            
+        # Wait until shutdown is requested
+        await bot._should_stop.wait()
+        
     except asyncio.CancelledError:
         logger.info("Bot stopped by user")
     except Exception as e:
         logger.error(f"Bot error: {str(e)}", exc_info=True)
     finally:
-        # Cleanup resources
         try:
-            if hasattr(bot, 'application') and bot.application:
-                await bot.application.shutdown()
+            # Shutdown application if it exists
+            if bot.application and bot.application.running:
                 await bot.application.stop()
+                await bot.application.shutdown()
             
+            # Cleanup other resources
             await bot.cleanup()
             
         except Exception as e:
@@ -354,19 +352,32 @@ async def run_bot():
 
 def main():
     """Main entry point"""
+    # Create and set new event loop
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     try:
-        loop.run_until_complete(run_bot())
+        # Run the bot
+        main_task = loop.create_task(run_bot())
+        loop.run_until_complete(main_task)
+        
     except KeyboardInterrupt:
         logger.info("Bot stopped by keyboard interrupt")
     except Exception as e:
         logger.error(f"Fatal error: {str(e)}", exc_info=True)
     finally:
-        # Cleanup loop
-        if not loop.is_closed():
-            loop.close()
+        # Get all pending tasks
+        pending = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
+        
+        # Cancel all pending tasks
+        for task in pending:
+            task.cancel()
+        
+        # Run loop until all tasks are cancelled
+        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        
+        # Close the loop
+        loop.close()
         logger.info("Bot shutdown complete")
 
 if __name__ == "__main__":
