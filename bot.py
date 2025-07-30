@@ -13,7 +13,7 @@ import logging
 import warnings
 from typing import Dict, Optional
 
-# Configure logging
+# تنظیمات پایه
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# Conversation states
+# حالت‌های گفتگو
 WAITING_COIN, WAITING_LEVERAGE, WAITING_ALLOCATION, WAITING_TARGET = range(4)
 
 class TradingMonitorBot:
@@ -31,7 +31,6 @@ class TradingMonitorBot:
         self.monitoring_tasks: Dict[int, asyncio.Task] = {}
         self.application: Optional[Application] = None
         self._should_stop = asyncio.Event()
-        self._polling_task: Optional[asyncio.Task] = None
 
     async def init_clients(self, api_key=None, api_secret=None):
         """Initialize API clients"""
@@ -40,20 +39,18 @@ class TradingMonitorBot:
 
     async def cleanup(self):
         """Cleanup resources properly"""
-        # Cancel all monitoring tasks
+        # توقف تمام تسک‌های مانیتورینگ
         for user_id, task in self.monitoring_tasks.items():
-            if not task.done():
-                task.cancel()
-                try:
-                    await task
-                except (asyncio.CancelledError, Exception):
-                    pass
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
         self.monitoring_tasks.clear()
         
-        # Close Binance client
+        # بستن اتصال به Binance
         if self.binance_client:
             await self.binance_client.close_connection()
-            self.binance_client = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
@@ -290,18 +287,18 @@ class TradingMonitorBot:
                 await asyncio.sleep(300)
 
 async def run_bot():
-    """Run the bot with proper resource management"""
+    """اجرای اصلی بات"""
     bot = TradingMonitorBot()
     
     try:
-        # Initialize clients
+        # تنظیم اولیه
         await bot.init_clients()
         
-        # Create application
+        # ایجاد برنامه تلگرام
         application = Application.builder().token("8000378956:AAGfDy2R8tcUR_LcOTEfgTv8fAca512IgJ8").build()
         bot.application = application
         
-        # Add handlers
+        # اضافه کردن هندلرها
         application.add_handler(CommandHandler("start", bot.start))
         application.add_handler(CommandHandler("status", bot.status))
         application.add_handler(CommandHandler("set_leverage", bot.set_leverage))
@@ -310,7 +307,7 @@ async def run_bot():
         application.add_handler(CommandHandler("start_monitor", bot.start_monitor))
         application.add_handler(CommandHandler("stop_monitor", bot.stop_monitor))
 
-        # Conversation handler
+        # هندلر گفتگو
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('set_coin', bot.set_coin)],
             states={
@@ -323,57 +320,26 @@ async def run_bot():
         )
         application.add_handler(conv_handler)
 
-        # Run polling in background
-        bot._polling_task = asyncio.create_task(application.run_polling())
-        
-        # Wait until shutdown is requested
-        await bot._should_stop.wait()
+        # اجرای پولینگ به صورت مستقیم (بدون ایجاد تسک جداگانه)
+        await application.run_polling()
         
     except asyncio.CancelledError:
         logger.info("توقف توسط کاربر")
     except Exception as e:
         logger.error(f"خطا در بات: {str(e)}", exc_info=True)
     finally:
-        try:
-            # Shutdown application if it exists
-            if bot.application and bot.application.running:
-                await bot.application.stop()
-                await bot.application.shutdown()
-            
-            # Cleanup other resources
-            await bot.cleanup()
-            
-        except Exception as e:
-            logger.error(f"خطا در تمیزکاری: {str(e)}", exc_info=True)
+        await bot.cleanup()
 
 def main():
-    """Main entry point"""
-    # Create and set new event loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
+    """ورودی اصلی برنامه"""
     try:
-        # Run the bot
-        main_task = loop.create_task(run_bot())
-        loop.run_until_complete(main_task)
-        
+        # اجرای بات با مدیریت خودکار حلقه رویداد
+        asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.info("توقف بات با کیبورد")
     except Exception as e:
         logger.error(f"خطای حیاتی: {str(e)}", exc_info=True)
     finally:
-        # Get all pending tasks
-        pending = [t for t in asyncio.all_tasks(loop) if t is not asyncio.current_task()]
-        
-        # Cancel all pending tasks
-        for task in pending:
-            task.cancel()
-        
-        # Run loop until all tasks are cancelled
-        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        
-        # Close the loop
-        loop.close()
         logger.info("بات با موفقیت خاموش شد")
 
 if __name__ == "__main__":
