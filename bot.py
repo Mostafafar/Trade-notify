@@ -302,7 +302,7 @@ async def run_bot():
         await bot.init_clients()
         
         # Create application
-        application = Application.builder().token("7584437136:AAFVtfF9RjCyteONcz8DSg2F2CfhgQT2GcQ").build()
+        application = Application.builder().token("8000378956:AAGfDy2R8tcUR_LcOTEfgTv8fAca512IgJ8").build()
         bot.application = application
         
         # Add handlers
