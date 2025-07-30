@@ -13,7 +13,7 @@ import logging
 import warnings
 from typing import Dict, Optional
 
-# تنظیمات پایه
+# Configure logging
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -21,7 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-# حالت‌های گفتگو
+# Conversation states
 WAITING_COIN, WAITING_LEVERAGE, WAITING_ALLOCATION, WAITING_TARGET = range(4)
 
 class TradingMonitorBot:
@@ -39,18 +39,20 @@ class TradingMonitorBot:
 
     async def cleanup(self):
         """Cleanup resources properly"""
-        # توقف تمام تسک‌های مانیتورینگ
+        # Cancel all monitoring tasks
         for user_id, task in self.monitoring_tasks.items():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
         self.monitoring_tasks.clear()
         
-        # بستن اتصال به Binance
+        # Close Binance client
         if self.binance_client:
             await self.binance_client.close_connection()
+            self.binance_client = None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Send welcome message"""
@@ -59,7 +61,7 @@ class TradingMonitorBot:
             "دستورات موجود:\n"
             "/set_coin - تنظیم ارز دیجیتال\n"
             "/set_leverage - تنظیم اهرم\n"
-            "/set_alloc - تنظیم درصد سرمایه\n" 
+            "/set_alloc - تنظیم درصد سرمایه\n"
             "/set_target - تنظیم درصد تغییر هدف\n"
             "/start_monitor - شروع مانیتورینگ\n"
             "/stop_monitor - توقف مانیتورینگ\n"
@@ -286,19 +288,19 @@ class TradingMonitorBot:
                 logger.error(f"خطا در مانیتورینگ برای کاربر {user_id}: {e}")
                 await asyncio.sleep(300)
 
-async def run_bot():
-    """اجرای اصلی بات"""
+async def main():
+    """Main async function to run the bot"""
     bot = TradingMonitorBot()
     
     try:
-        # تنظیم اولیه
+        # Initialize clients
         await bot.init_clients()
         
-        # ایجاد برنامه تلگرام
+        # Create application
         application = Application.builder().token("8000378956:AAGfDy2R8tcUR_LcOTEfgTv8fAca512IgJ8").build()
         bot.application = application
         
-        # اضافه کردن هندلرها
+        # Add handlers
         application.add_handler(CommandHandler("start", bot.start))
         application.add_handler(CommandHandler("status", bot.status))
         application.add_handler(CommandHandler("set_leverage", bot.set_leverage))
@@ -307,7 +309,7 @@ async def run_bot():
         application.add_handler(CommandHandler("start_monitor", bot.start_monitor))
         application.add_handler(CommandHandler("stop_monitor", bot.stop_monitor))
 
-        # هندلر گفتگو
+        # Conversation handler
         conv_handler = ConversationHandler(
             entry_points=[CommandHandler('set_coin', bot.set_coin)],
             states={
@@ -320,7 +322,7 @@ async def run_bot():
         )
         application.add_handler(conv_handler)
 
-        # اجرای پولینگ به صورت مستقیم (بدون ایجاد تسک جداگانه)
+        # Run polling
         await application.run_polling()
         
     except asyncio.CancelledError:
@@ -329,18 +331,8 @@ async def run_bot():
         logger.error(f"خطا در بات: {str(e)}", exc_info=True)
     finally:
         await bot.cleanup()
-
-def main():
-    """ورودی اصلی برنامه"""
-    try:
-        # اجرای بات با مدیریت خودکار حلقه رویداد
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("توقف بات با کیبورد")
-    except Exception as e:
-        logger.error(f"خطای حیاتی: {str(e)}", exc_info=True)
-    finally:
         logger.info("بات با موفقیت خاموش شد")
 
 if __name__ == "__main__":
-    main()
+    # Run the bot with proper event loop management
+    asyncio.run(main())
