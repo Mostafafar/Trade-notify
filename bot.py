@@ -1,5 +1,8 @@
 import asyncio
 import aiohttp
+import hmac
+import hashlib
+import time
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -9,7 +12,7 @@ from telegram.ext import (
     filters
 )
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -18,62 +21,82 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class NobitexTradingBot:
+class RamzinexTradingBot:
     def __init__(self):
         self.session = None
         self.application = None
         self.monitoring_tasks: Dict[int, asyncio.Task] = {}
-        self.base_url = "https://api.nobitex.ir"
-        self.supported_symbols = [
-            "BTCIRT", "ETHIRT", "USDTIRT", "ADAIRT", "XRPIRT", 
-            "DOGEIRT", "LTCIRT", "BNBIRT", "SOLIRT", "MATICIRT"
-        ]
+        self.base_url = "https://api.ramzinex.com"
+        self.api_key = "ApiKeyosoODeI"
+        self.api_secret = "b6134b647c9596fdb226129a6970f37ff00e21cb9656a6db9a931a734a008120"
+        self.headers = {
+            "Content-Type": "application/json",
+            "X-API-KEY": self.api_key
+        }
 
     async def init_session(self):
         """Initialize aiohttp session"""
         self.session = aiohttp.ClientSession()
 
-    async def get_nobitex_price(self, symbol: str) -> Optional[float]:
-        """Get current price from Nobitex API"""
-        url = f"{self.base_url}/v2/orderbook/{symbol}"
+    def generate_signature(self, params: dict) -> str:
+        """Generate HMAC SHA256 signature"""
+        query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())]
+        return hmac.new(
+            self.api_secret.encode('utf-8'),
+            query_string.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+    async def get_ramzinex_price(self, symbol: str) -> Optional[float]:
+        """Get current price from Ramzinex API"""
+        url = f"{self.base_url}/exchange/api/v1.0/exchange/pairs/{symbol}/ticker"
         try:
             async with self.session.get(url) as response:
                 data = await response.json()
-                if data.get('status') == 'ok' and 'lastTradePrice' in data:
-                    return float(data['lastTradePrice'])
-                logger.error(f"خطا در دریافت قیمت از نوبیتکس: {data}")
+                if data.get('status') == 'success' and data.get('data'):
+                    return float(data['data']['lastPrice'])
+                logger.error(f"خطا در دریافت قیمت از رمزینکس: {data}")
                 return None
         except Exception as e:
-            logger.error(f"خطا در اتصال به نوبیتکس: {e}")
+            logger.error(f"خطا در اتصال به رمزینکس: {e}")
             return None
 
-    async def get_nobitex_trades(self, symbol: str) -> Optional[List[Dict]]:
-        """Get recent trades from Nobitex API"""
-        url = f"{self.base_url}/v2/trades/{symbol}"
+    async def get_account_balance(self):
+        """Get user account balance"""
+        path = "/exchange/api/v1.0/exchange/account/balances"
+        timestamp = int(time.time() * 1000)
+        params = {"timestamp": timestamp}
+        signature = self.generate_signature(params)
+        
+        url = f"{self.base_url}{path}"
+        headers = {
+            **self.headers,
+            "X-SIGNATURE": signature
+        }
+        
         try:
-            async with self.session.get(url) as response:
+            async with self.session.get(url, headers=headers, params=params) as response:
                 data = await response.json()
-                if data.get('status') == 'ok' and 'trades' in data:
-                    return data['trades']
-                logger.error(f"خطا در دریافت معاملات از نوبیتکس: {data}")
+                if data.get('status') == 'success':
+                    return data.get('data', {})
+                logger.error(f"خطا در دریافت موجودی: {data}")
                 return None
         except Exception as e:
-            logger.error(f"خطا در اتصال به نوبیتکس: {e}")
+            logger.error(f"خطا در دریافت موجودی حساب: {e}")
             return None
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """ارسال پیام خوشآمدگویی"""
         await update.message.reply_text(
-            "👋 **ربات مانیتورینگ معاملات با اهرم (با نوبیتکس)**\n\n"
-            "🪙 نمادهای پشتیبانی شده:\n" + 
-            "\n".join(f"- {sym}" for sym in self.supported_symbols) +
-            "\n\n🔹 دستورات:\n"
-            "/set_coin - تنظیم ارز\n"
+            "👋 **ربات مانیتورینگ معاملات با اهرم (رمزینهکس)**\n\n"
+            "دستورات موجود:\n"
+            "/set_coin - تنظیم ارز (مثلاً BTC-IRR)\n"
             "/set_leverage - تنظیم اهرم\n"
             "/set_alloc - تنظیم درصد سرمایه\n"
             "/set_target - تنظیم درصد تغییر هدف\n"
             "/start_monitor - شروع مانیتورینگ\n"
             "/stop_monitor - توقف مانیتورینگ\n"
+            "/balance - نمایش موجودی حساب\n"
             "/status - نمایش وضعیت فعلی",
             parse_mode='Markdown'
         )
@@ -82,8 +105,9 @@ class NobitexTradingBot:
         """تنظیم ارز برای مانیتورینگ"""
         context.user_data['waiting_for'] = 'coin'
         await update.message.reply_text(
-            "لطفاً نماد ارز را وارد کنید (مثلاً BTCIRT یا ETHIRT):\n"
-            "نماد باید با IRT پایان یابد (مثلاً BTCIRT)"
+            "لطفاً نماد ارز را وارد کنید (مثلاً BTC-IRR یا ETH-IRR):\n\n"
+            "نمادهای معتبر رمزینکس:\n"
+            "BTC-IRR, ETH-IRR, USDT-IRR, ..."
         )
 
     async def set_leverage(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -110,6 +134,18 @@ class NobitexTradingBot:
         context.user_data['waiting_for'] = 'target'
         await update.message.reply_text("لطفاً درصد تغییر هدف را وارد کنید (مثلاً 5 برای 5%):")
 
+    async def balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """نمایش موجودی حساب"""
+        balance = await self.get_account_balance()
+        if balance:
+            message = "💰 موجودی حساب شما:\n\n"
+            for currency, amount in balance.items():
+                if float(amount['available']) > 0:
+                    message += f"{currency}: {amount['available']}\n"
+            await update.message.reply_text(message)
+        else:
+            await update.message.reply_text("⚠️ خطا در دریافت موجودی حساب")
+
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """نمایش وضعیت فعلی"""
         user_data = context.user_data
@@ -120,8 +156,8 @@ class NobitexTradingBot:
         
         message = "📊 وضعیت فعلی:\n\n"
         if 'coin' in user_data:
-            price = await self.get_nobitex_price(user_data['coin'])
-            message += f"🏷️ ارز: {user_data['coin']} (قیمت فعلی: {price if price else 'نامعلوم'} تومان)\n"
+            price = await self.get_ramzinex_price(user_data['coin'])
+            message += f"🏷️ ارز: {user_data['coin']} (قیمت فعلی: {price if price else 'نامعلوم'} ریال)\n"
         if 'leverage' in user_data:
             message += f"📈 اهرم: {user_data['leverage']}x\n"
         if 'allocation' in user_data:
@@ -144,25 +180,19 @@ class NobitexTradingBot:
 
         try:
             if waiting_for == 'coin':
-                if text not in self.supported_symbols:
-                    await update.message.reply_text(
-                        f"⚠️ نماد {text} پشتیبانی نمی‌شود. لطفاً از نمادهای IRT استفاده کنید.\n"
-                        f"نمادهای معتبر: {', '.join(self.supported_symbols)}"
-                    )
-                    return
-                
-                price = await self.get_nobitex_price(text)
+                # بررسی وجود جفت ارز در رمزینکس
+                price = await self.get_ramzinex_price(text)
                 if price is None:
-                    await update.message.reply_text(f"⚠️ خطا در دریافت قیمت {text} از نوبیتکس")
+                    await update.message.reply_text(f"⚠️ ارز {text} در رمزینکس یافت نشد")
                     return
                 
                 context.user_data['coin'] = text
-                await update.message.reply_text(f"✅ ارز {text} تنظیم شد (قیمت فعلی: {price:,.0f} تومان)")
+                await update.message.reply_text(f"✅ ارز {text} تنظیم شد (قیمت فعلی: {price:,.0f} ریال)")
                 await self.set_leverage(update, context)
 
             elif waiting_for == 'leverage':
                 leverage = float(text)
-                if not 1 <= leverage <= 10:  # محدودیت اهرم برای بازار ایران
+                if not 1 <= leverage <= 10:
                     raise ValueError("اهرم باید بین 1 تا 10 باشد")
                 context.user_data['leverage'] = leverage
                 await update.message.reply_text(f"✅ اهرم {leverage}x تنظیم شد")
@@ -182,14 +212,15 @@ class NobitexTradingBot:
                     raise ValueError("درصد تغییر باید بزرگتر از 0 باشد")
                 context.user_data['target_change'] = target
                 
-                price = await self.get_nobitex_price(context.user_data['coin'])
+                # دریافت قیمت فعلی برای نمایش
+                price = await self.get_ramzinex_price(context.user_data['coin'])
                 await update.message.reply_text(
                     f"✅ تنظیمات کامل شد:\n\n"
                     f"🏷️ ارز: {context.user_data['coin']}\n"
                     f"📊 اهرم: {context.user_data['leverage']}x\n"
                     f"💰 تخصیص: {context.user_data['allocation']}%\n"
                     f"🎯 درصد تغییر هدف: {context.user_data['target_change']}%\n"
-                    f"💵 قیمت فعلی: {price:,.0f} تومان\n\n"
+                    f"💵 قیمت فعلی: {price:,.0f} ریال\n\n"
                     f"برای شروع مانیتورینگ از /start_monitor استفاده کنید"
                 )
                 context.user_data.pop('waiting_for', None)
@@ -208,7 +239,7 @@ class NobitexTradingBot:
         
         while context.user_data.get('monitoring', False):
             try:
-                current_price = await self.get_nobitex_price(context.user_data['coin'])
+                current_price = await self.get_ramzinex_price(context.user_data['coin'])
                 if current_price is None:
                     await asyncio.sleep(60)
                     continue
@@ -224,25 +255,17 @@ class NobitexTradingBot:
                 
                 if abs(change) >= context.user_data['target_change']:
                     direction = "📈 افزایش" if change > 0 else "📉 کاهش"
-                    trades = await self.get_nobitex_trades(context.user_data['coin'])
-                    last_trade = trades[0] if trades else None
-                    
-                    message = (
-                        f"🚨 اعلان تغییر قیمت 🚨\n\n"
-                        f"🏷️ ارز: {context.user_data['coin']}\n"
-                        f"{direction} {abs(change):.2f}% (با اهرم {leverage}x)\n"
-                        f"💰 تخصیص: {context.user_data['allocation']}%\n\n"
-                        f"قیمت قبلی: {last_price:,.0f} تومان\n"
-                        f"قیمت فعلی: {current_price:,.0f} تومан"
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=(
+                            f"🚨 اعلان تغییر قیمت 🚨\n\n"
+                            f"🏷️ ارز: {context.user_data['coin']}\n"
+                            f"{direction} {abs(change):.2f}% (با اهرم {leverage}x)\n"
+                            f"💰 تخصیص: {context.user_data['allocation']}%\n\n"
+                            f"قیمت قبلی: {last_price:,.0f} ریال\n"
+                            f"قیمت فعلی: {current_price:,.0f} ریال"
+                        )
                     )
-                    
-                    if last_trade:
-                        message += f"\n\nآخرین معامله:\n"
-                        message += f"قیمت: {float(last_trade['price']):,.0f} تومان\n"
-                        message += f"حجم: {last_trade['volume']}\n"
-                        message += f"نوع: {'فروش' if last_trade['type'] == 'sell' else 'خرید'}"
-                    
-                    await context.bot.send_message(chat_id=user_id, text=message)
                     context.user_data['last_price'] = current_price
                 
                 await asyncio.sleep(60)
@@ -256,12 +279,14 @@ class NobitexTradingBot:
     async def start_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """شروع مانیتورینگ"""
         user_id = update.effective_user.id
+        logger.info(f"دریافت دستور start_monitor از کاربر {user_id}")
+        
         required_keys = ['coin', 'leverage', 'allocation', 'target_change']
         
         if not all(key in context.user_data for key in required_keys):
             missing = [k for k in required_keys if k not in context.user_data]
             await update.message.reply_text(
-                f"⚠️ لطفاً ابتدا تنظیمات را کامل کنید. موارد گمشده: {', '.join(missing)}"
+                f"⚠️ لطفاً ابتدا تنظیمات را کامل کنید. موارد缺失: {', '.join(missing)}"
             )
             return
         
@@ -270,7 +295,7 @@ class NobitexTradingBot:
             return
 
         context.user_data['monitoring'] = True
-        context.user_data['last_price'] = await self.get_nobitex_price(context.user_data['coin'])
+        context.user_data['last_price'] = await self.get_ramzinex_price(context.user_data['coin'])
         
         # لغو تسک قبلی اگر وجود دارد
         if user_id in self.monitoring_tasks:
@@ -292,6 +317,8 @@ class NobitexTradingBot:
     async def stop_monitor(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """توقف مانیتورینگ"""
         user_id = update.effective_user.id
+        logger.info(f"دریافت دستور stop_monitor از کاربر {user_id}")
+        
         if context.user_data.get('monitoring'):
             context.user_data['monitoring'] = False
             
@@ -309,7 +336,7 @@ class NobitexTradingBot:
 
 async def run_bot():
     """اجرای اصلی بات"""
-    bot = NobitexTradingBot()
+    bot = RamzinexTradingBot()
     await bot.init_session()
     
     application = Application.builder().token("8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU").build()
@@ -324,6 +351,7 @@ async def run_bot():
         CommandHandler("set_target", bot.set_target),
         CommandHandler("start_monitor", bot.start_monitor),
         CommandHandler("stop_monitor", bot.stop_monitor),
+        CommandHandler("balance", bot.balance),
         CommandHandler("status", bot.status),
         MessageHandler(filters.TEXT & ~filters.COMMAND, bot.handle_message)
     ]
