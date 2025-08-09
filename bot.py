@@ -40,7 +40,7 @@ class RamzinexTradingBot:
 
     def generate_signature(self, params: dict) -> str:
         """Generate HMAC SHA256 signature"""
-        query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())]
+        query_string = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
         return hmac.new(
             self.api_secret.encode('utf-8'),
             query_string.encode('utf-8'),
