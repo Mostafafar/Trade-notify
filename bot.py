@@ -25,24 +25,31 @@ def init_db():
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (user_id INTEGER, currency TEXT, threshold REAL, 
+                 (user_id INTEGER, currency TEXT, pair_id INTEGER, threshold REAL, 
                   last_price REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   PRIMARY KEY (user_id, currency))''')
     conn.commit()
     conn.close()
 
-def get_all_markets():
-    """دریافت لیست تمام بازارهای موجود از رمزینکس"""
+def get_all_markets_info():
+    """دریافت اطلاعات تمام بازارها از API رمزینکس"""
     try:
-        response = requests.get(f"{BASE_URL}/markets")
+        # ابتدا اطلاعات جفت‌ارزها را از endpoint buys_sells دریافت می‌کنیم
+        response = requests.get(f"{BASE_URL}/orderbooks/buys_sells")
         logger.info(f"Markets API Status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict) and 'data' in data:
-                return data['data']
+            if isinstance(data, dict):
+                # داده‌ها به صورت {pair_id: {buys: [], sells: []}} هستند
+                markets = []
+                for pair_id, market_data in data.items():
+                    if pair_id.isdigit():  # اطمینان از اینکه pair_id عددی است
+                        markets.append({
+                            'pair_id': int(pair_id),
+                            'data': market_data
+                        })
+                return markets
             else:
                 logger.error(f"Unexpected markets data structure: {type(data)}")
                 return []
@@ -51,51 +58,63 @@ def get_all_markets():
             return []
             
     except Exception as e:
-        logger.error(f"Error getting markets: {e}")
+        logger.error(f"Error getting markets info: {e}")
         return []
 
+def get_currency_pair_id(currency_symbol):
+    """یافتن pair_id مربوط به یک ارز خاص"""
+    # این تابع نیاز به یک نگاشت بین نماد ارزها و pair_idها دارد
+    # بر اساس مستندات رمزینکس، pair_idها عددی هستند (مثلاً 11 برای یک جفت ارز خاص)
+    
+    # نگاشت شناخته‌شده‌های رایج (می‌توانید این لیست را گسترش دهید)
+    currency_mapping = {
+        'BTC': 11,    # مثال - باید با pair_id واقعی جایگزین شود
+        'ETH': 12,    # مثال
+        'USDT': 21,   # مثال
+        'IRT': 1,     # مثال - ریال ایران
+        # اضافه کردن جفت‌ارزهای دیگر بر اساس مستندات واقعی
+    }
+    
+    return currency_mapping.get(currency_symbol.upper())
+
 def get_price(currency_symbol):
-    """دریافت قیمت از رمزینکس با API عمومی"""
+    """دریافت قیمت از رمزینکس با استفاده از API معاملات"""
     try:
-        markets = get_all_markets()
-        if not markets:
-            logger.error("No markets data available")
+        pair_id = get_currency_pair_id(currency_symbol)
+        if not pair_id:
+            logger.warning(f"No pair_id mapping found for {currency_symbol}")
             return None
         
-        # جستجوی بازار مورد نظر
-        currency_symbol = currency_symbol.upper()
-        for market in markets:
-            # بررسی انواع مختلف ساختار بازار
-            base_currency = None
-            
-            if 'base_currency_symbol' in market:
-                base_currency = market['base_currency_symbol'].upper()
-            elif 'currency1' in market and isinstance(market['currency1'], dict):
-                base_currency = market['currency1'].get('symbol', '').upper()
-            elif 'symbol' in market:
-                # اگر symbol به صورت جفت ارز باشد (مثلاً BTC/IRT)
-                symbol_parts = market['symbol'].split('/')
-                if len(symbol_parts) > 0:
-                    base_currency = symbol_parts[0].upper()
-            
-            if base_currency == currency_symbol:
-                # استخراج قیمت از فیلدهای مختلف
-                price = None
-                if 'price' in market:
-                    price = market['price']
-                elif 'last_price' in market:
-                    price = market['last_price']
-                elif 'lastPrice' in market:
-                    price = market['lastPrice']
-                elif 'latest' in market:
-                    price = market['latest']
-                
-                if price:
-                    logger.info(f"Found {currency_symbol}: {price}")
-                    return float(price)
+        # استفاده از endpoint معاملات برای دریافت آخرین قیمت
+        response = requests.get(f"{BASE_URL}/orderbooks/{pair_id}/trades")
+        logger.info(f"Price API Status for {currency_symbol} (pair_id: {pair_id}): {response.status_code}")
         
-        logger.warning(f"Currency {currency_symbol} not found in markets")
-        return None
+        if response.status_code == 200:
+            data = response.json()
+            
+            # بررسی ساختار پاسخ بر اساس مستندات
+            if isinstance(data, dict) and data.get('status') == 0:
+                trades = data.get('data', [])
+                if trades and len(trades) > 0:
+                    # آخرین معامله را به عنوان قیمت فعلی در نظر می‌گیریم
+                    last_trade = trades[0]
+                    
+                    # استخراج قیمت از آخرین معامله
+                    price = None
+                    if 'price' in last_trade:
+                        price = last_trade['price']
+                    elif 'last_price' in last_trade:
+                        price = last_trade['last_price']
+                    
+                    if price:
+                        logger.info(f"Found price for {currency_symbol}: {price}")
+                        return float(price)
+            
+            logger.warning(f"No valid price data found for {currency_symbol}")
+            return None
+        else:
+            logger.error(f"Price API Error for {currency_symbol}: {response.status_code} - {response.text[:200]}")
+            return None
             
     except Exception as e:
         logger.error(f"Error getting price for {currency_symbol}: {e}")
@@ -103,31 +122,9 @@ def get_price(currency_symbol):
 
 def get_all_currencies():
     """دریافت لیست تمام ارزهای قابل معامله"""
-    try:
-        markets = get_all_markets()
-        currencies = set()
-        
-        for market in markets:
-            # استخراج نماد ارز پایه
-            base_currency = None
-            
-            if 'base_currency_symbol' in market:
-                base_currency = market['base_currency_symbol'].upper()
-            elif 'currency1' in market and isinstance(market['currency1'], dict):
-                base_currency = market['currency1'].get('symbol', '').upper()
-            elif 'symbol' in market:
-                symbol_parts = market['symbol'].split('/')
-                if len(symbol_parts) > 0:
-                    base_currency = symbol_parts[0].upper()
-            
-            if base_currency:
-                currencies.add(base_currency)
-        
-        return sorted(list(currencies))
-        
-    except Exception as e:
-        logger.error(f"Error getting currencies: {e}")
-        return []
+    # لیست ارزهای پشتیبانی شده بر اساس نگاشت ما
+    supported_currencies = ['BTC', 'ETH', 'USDT', 'IRT', 'LTC', 'XRP', 'ADA', 'DOT', 'BCH', 'LINK']
+    return sorted(supported_currencies)
 
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
@@ -172,7 +169,7 @@ async def test_price(update: Update, context: CallbackContext):
         if currencies:
             await update.message.reply_text(
                 f"❌ ارز {currency} یافت نشد.\n\n"
-                f"✅ ارزهای موجود: {', '.join(currencies[:15])}"
+                f"✅ ارزهای موجود: {', '.join(currencies)}"
             )
         else:
             await update.message.reply_text("❌ خطا در اتصال به API رمزینکس")
@@ -197,17 +194,21 @@ async def set_alert(update: Update, context: CallbackContext):
         return
     
     # بررسی وجود ارز
-    current_price = get_price(currency)
-    if current_price is None:
+    pair_id = get_currency_pair_id(currency)
+    if not pair_id:
         currencies_list = get_all_currencies()
         if currencies_list:
             await update.message.reply_text(
                 f"❌ ارز {currency} یافت نشد.\n\n"
-                f"✅ ارزهای موجود: {', '.join(currencies_list[:10])}\n"
-                f"برای دیدن لیست کامل از /currencies استفاده کنید."
+                f"✅ ارزهای موجود: {', '.join(currencies_list)}\n"
             )
         else:
             await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور")
+        return
+    
+    current_price = get_price(currency)
+    if current_price is None:
+        await update.message.reply_text("❌ خطا در دریافت قیمت فعلی از سرور رمزینکس")
         return
     
     # ذخیره در دیتابیس
@@ -216,9 +217,9 @@ async def set_alert(update: Update, context: CallbackContext):
     
     try:
         c.execute('''INSERT OR REPLACE INTO alerts 
-                     (user_id, currency, threshold, last_price) 
-                     VALUES (?, ?, ?, ?)''', 
-                 (user_id, currency, threshold, current_price))
+                     (user_id, currency, pair_id, threshold, last_price) 
+                     VALUES (?, ?, ?, ?, ?)''', 
+                 (user_id, currency, pair_id, threshold, current_price))
         conn.commit()
         
         await update.message.reply_text(
@@ -289,11 +290,7 @@ async def list_currencies(update: Update, context: CallbackContext):
         
         if currencies:
             text = f"💰 **ارزهای قابل دسترسی ({len(currencies)} ارز):**\n\n"
-            # نمایش 20 ارز اول
-            text += ", ".join(currencies[:20])
-            
-            if len(currencies) > 20:
-                text += f"\n\n... و {len(currencies) - 20} ارز دیگر"
+            text += ", ".join(currencies)
             
             await update.message.reply_text(text, parse_mode='Markdown')
         else:
@@ -307,10 +304,10 @@ async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
-    c.execute('SELECT user_id, currency, threshold, last_price FROM alerts')
+    c.execute('SELECT user_id, currency, pair_id, threshold, last_price FROM alerts')
     alerts = c.fetchall()
     
-    for user_id, currency, threshold, last_price in alerts:
+    for user_id, currency, pair_id, threshold, last_price in alerts:
         current_price = get_price(currency)
         if current_price and last_price:
             change_percent = ((current_price - last_price) / last_price) * 100
