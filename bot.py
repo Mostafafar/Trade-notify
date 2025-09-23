@@ -236,23 +236,31 @@ def main():
     # مقداردهی اولیه دیتابیس
     init_db()
     
-    # ایجاد اپلیکیشن تلگرام
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-    
-    # اضافه کردن هندلرها
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("set", set_alert))
-    application.add_handler(CommandHandler("list", list_alerts))
-    application.add_handler(CommandHandler("remove", remove_alert))
-    application.add_handler(CommandHandler("currencies", list_currencies))
-    
-    # تنظیم چک دوره‌ای هشدارها (هر 30 ثانیه)
-    job_queue = application.job_queue
-    job_queue.run_repeating(check_alerts, interval=30, first=10)
-    
-    # شروع ربات
-    application.run_polling()
-    logger.info("Bot started successfully")
+    try:
+        # ایجاد اپلیکیشن تلگرام
+        application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # اضافه کردن هندلرها
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("set", set_alert))
+        application.add_handler(CommandHandler("list", list_alerts))
+        application.add_handler(CommandHandler("remove", remove_alert))
+        application.add_handler(CommandHandler("currencies", list_currencies))
+        
+        # بررسی وجود job_queue
+        if application.job_queue is None:
+            application.job_queue = application.bot.job_queue
+            
+        # تنظیم چک دوره‌ای هشدارها (هر 30 ثانیه)
+        job_queue = application.job_queue
+        job_queue.run_repeating(check_alerts, interval=30, first=10)
+        
+        # شروع ربات
+        application.run_polling()
+        logger.info("Bot started successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to start bot: {e}")
 
 if __name__ == '__main__':
     main()
