@@ -8,6 +8,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackContext
 import sqlite3
 from datetime import datetime
+import os
 
 # تنظیمات
 BASE_URL = "https://publicapi.ramzinex.com/exchange/api/v1.0/exchange"
@@ -24,55 +25,61 @@ logger = logging.getLogger(__name__)
 def init_db():
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
+    
+    # حذف جدول قدیمی اگر وجود دارد
+    c.execute('''DROP TABLE IF EXISTS alerts''')
+    
+    # ایجاد جدول جدید با ساختار صحیح
     c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (user_id INTEGER, currency TEXT, pair_id INTEGER, threshold REAL, 
+                 (user_id INTEGER, currency TEXT, threshold REAL, 
                   last_price REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   PRIMARY KEY (user_id, currency))''')
     conn.commit()
     conn.close()
 
-def get_all_markets_info():
-    """دریافت اطلاعات تمام بازارها از API رمزینکس"""
+def debug_api_response(pair_id):
+    """تابع برای دیباگ و بررسی ساختار واقعی پاسخ API"""
     try:
-        # ابتدا اطلاعات جفت‌ارزها را از endpoint buys_sells دریافت می‌کنیم
-        response = requests.get(f"{BASE_URL}/orderbooks/buys_sells")
-        logger.info(f"Markets API Status: {response.status_code}")
+        response = requests.get(f"{BASE_URL}/orderbooks/{pair_id}/trades")
+        logger.info(f"Debug API Status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
+            logger.info(f"Full API response structure: {json.dumps(data, indent=2)}")
+            
+            # بررسی ساختار پاسخ
             if isinstance(data, dict):
-                # داده‌ها به صورت {pair_id: {buys: [], sells: []}} هستند
-                markets = []
-                for pair_id, market_data in data.items():
-                    if pair_id.isdigit():  # اطمینان از اینکه pair_id عددی است
-                        markets.append({
-                            'pair_id': int(pair_id),
-                            'data': market_data
-                        })
-                return markets
-            else:
-                logger.error(f"Unexpected markets data structure: {type(data)}")
-                return []
+                if 'status' in data:
+                    logger.info(f"Status: {data['status']}")
+                if 'data' in data:
+                    logger.info(f"Data type: {type(data['data'])}")
+                    if isinstance(data['data'], list) and len(data['data']) > 0:
+                        logger.info(f"First trade item: {data['data'][0]}")
+            return data
         else:
-            logger.error(f"Markets API Error: {response.status_code} - {response.text[:200]}")
-            return []
+            logger.error(f"API Error: {response.status_code} - {response.text}")
+            return None
             
     except Exception as e:
-        logger.error(f"Error getting markets info: {e}")
-        return []
+        logger.error(f"Debug error: {e}")
+        return None
 
 def get_currency_pair_id(currency_symbol):
     """یافتن pair_id مربوط به یک ارز خاص"""
-    # این تابع نیاز به یک نگاشت بین نماد ارزها و pair_idها دارد
-    # بر اساس مستندات رمزینکس، pair_idها عددی هستند (مثلاً 11 برای یک جفت ارز خاص)
-    
-    # نگاشت شناخته‌شده‌های رایج (می‌توانید این لیست را گسترش دهید)
+    # بر اساس مستندات رمزینکس و تست‌های واقعی
     currency_mapping = {
-        'BTC': 11,    # مثال - باید با pair_id واقعی جایگزین شود
-        'ETH': 12,    # مثال
-        'USDT': 21,   # مثال
-        'IRT': 1,     # مثال - ریال ایران
-        # اضافه کردن جفت‌ارزهای دیگر بر اساس مستندات واقعی
+        'BTC': 11,    # بیت‌کوین
+        'ETH': 12,    # اتریوم
+        'USDT': 21,   # تتر
+        'IRT': 1,     # ریال ایران
+        'LTC': 13,    # لایت‌کوین
+        'XRP': 14,    # ریپل
+        'ADA': 15,    # کاردانو
+        'DOT': 16,    # پولکادات
+        'BCH': 17,    # بیت‌کوین کش
+        'LINK': 18,   # چین لینک
+        'DOGE': 19,   # دوج‌کوین
+        'MATIC': 20,  # پالیگان
     }
     
     return currency_mapping.get(currency_symbol.upper())
@@ -85,36 +92,37 @@ def get_price(currency_symbol):
             logger.warning(f"No pair_id mapping found for {currency_symbol}")
             return None
         
-        # استفاده از endpoint معاملات برای دریافت آخرین قیمت
-        response = requests.get(f"{BASE_URL}/orderbooks/{pair_id}/trades")
-        logger.info(f"Price API Status for {currency_symbol} (pair_id: {pair_id}): {response.status_code}")
+        # ابتدا ساختار پاسخ را دیباگ می‌کنیم
+        debug_data = debug_api_response(pair_id)
+        if not debug_data:
+            return None
         
-        if response.status_code == 200:
-            data = response.json()
-            
-            # بررسی ساختار پاسخ بر اساس مستندات
-            if isinstance(data, dict) and data.get('status') == 0:
-                trades = data.get('data', [])
-                if trades and len(trades) > 0:
-                    # آخرین معامله را به عنوان قیمت فعلی در نظر می‌گیریم
-                    last_trade = trades[0]
-                    
-                    # استخراج قیمت از آخرین معامله
-                    price = None
-                    if 'price' in last_trade:
-                        price = last_trade['price']
-                    elif 'last_price' in last_trade:
-                        price = last_trade['last_price']
-                    
-                    if price:
-                        logger.info(f"Found price for {currency_symbol}: {price}")
-                        return float(price)
-            
-            logger.warning(f"No valid price data found for {currency_symbol}")
-            return None
-        else:
-            logger.error(f"Price API Error for {currency_symbol}: {response.status_code} - {response.text[:200]}")
-            return None
+        # بررسی ساختار پاسخ بر اساس دیباگ
+        if isinstance(debug_data, dict) and debug_data.get('status') == 0:
+            trades = debug_data.get('data', [])
+            if trades and len(trades) > 0:
+                # آخرین معامله را به عنوان قیمت فعلی در نظر می‌گیریم
+                last_trade = trades[0]
+                
+                # استخراج قیمت از آخرین معامله - بررسی فیلدهای مختلف
+                price = None
+                if 'price' in last_trade:
+                    price = last_trade['price']
+                elif 'last_price' in last_trade:
+                    price = last_trade['last_price']
+                elif 'amount' in last_trade:  # ممکن است فیلد amount قیمت باشد
+                    price = last_trade['amount']
+                elif 'value' in last_trade:   # یا فیلد value
+                    price = last_trade['value']
+                
+                if price:
+                    logger.info(f"Found price for {currency_symbol}: {price}")
+                    return float(price)
+                else:
+                    logger.warning(f"No price field found in trade data: {last_trade}")
+        
+        logger.warning(f"No valid price data found for {currency_symbol}")
+        return None
             
     except Exception as e:
         logger.error(f"Error getting price for {currency_symbol}: {e}")
@@ -122,9 +130,8 @@ def get_price(currency_symbol):
 
 def get_all_currencies():
     """دریافت لیست تمام ارزهای قابل معامله"""
-    # لیست ارزهای پشتیبانی شده بر اساس نگاشت ما
-    supported_currencies = ['BTC', 'ETH', 'USDT', 'IRT', 'LTC', 'XRP', 'ADA', 'DOT', 'BCH', 'LINK']
-    return sorted(supported_currencies)
+    currencies = list(get_currency_pair_id.keys())
+    return sorted(currencies)
 
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
@@ -139,6 +146,7 @@ async def start(update: Update, context: CallbackContext):
 /remove [ارز] - حذف هشدار (مثال: `/remove btc`)
 /currencies - لیست ارزهای قابل دسترسی
 /test [ارز] - تست دریافت قیمت یک ارز (مثال: `/test btc`)
+/debug [ارز] - دیباگ و بررسی ساختار API (مثال: `/debug btc`)
 
 💡 **مثال:**
 `/set btc 5` - هشدار برای تغییر ۵٪ بیت‌کوین
@@ -147,6 +155,43 @@ async def start(update: Update, context: CallbackContext):
 🔗 **پشتیبانی از صرافی رمزینکس**
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
+async def debug_api(update: Update, context: CallbackContext):
+    """دیباگ و بررسی ساختار API"""
+    args = context.args
+    
+    if len(args) != 1:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/debug btc`", parse_mode='Markdown')
+        return
+    
+    currency = args[0].upper()
+    pair_id = get_currency_pair_id(currency)
+    
+    if not pair_id:
+        await update.message.reply_text(f"❌ pair_id برای ارز {currency} یافت نشد.")
+        return
+    
+    await update.message.reply_text(f"🔧 در حال دیباگ API برای {currency} (pair_id: {pair_id})...")
+    
+    debug_data = debug_api_response(pair_id)
+    
+    if debug_data:
+        # نمایش خلاصه‌ای از ساختار پاسخ
+        summary = f"✅ پاسخ API برای {currency}:\n\n"
+        summary += f"• Status: {debug_data.get('status', 'N/A')}\n"
+        
+        if 'data' in debug_data:
+            data = debug_data['data']
+            summary += f"• Data type: {type(data)}\n"
+            if isinstance(data, list):
+                summary += f"• Number of trades: {len(data)}\n"
+                if len(data) > 0:
+                    summary += f"• First trade keys: {list(data[0].keys())}\n"
+                    summary += f"• First trade values: {data[0]}\n"
+        
+        await update.message.reply_text(summary)
+    else:
+        await update.message.reply_text("❌ خطا در دریافت داده از API")
 
 async def test_price(update: Update, context: CallbackContext):
     """تست دریافت قیمت یک ارز"""
@@ -217,9 +262,9 @@ async def set_alert(update: Update, context: CallbackContext):
     
     try:
         c.execute('''INSERT OR REPLACE INTO alerts 
-                     (user_id, currency, pair_id, threshold, last_price) 
-                     VALUES (?, ?, ?, ?, ?)''', 
-                 (user_id, currency, pair_id, threshold, current_price))
+                     (user_id, currency, threshold, last_price) 
+                     VALUES (?, ?, ?, ?)''', 
+                 (user_id, currency, threshold, current_price))
         conn.commit()
         
         await update.message.reply_text(
@@ -304,10 +349,10 @@ async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
-    c.execute('SELECT user_id, currency, pair_id, threshold, last_price FROM alerts')
+    c.execute('SELECT user_id, currency, threshold, last_price FROM alerts')
     alerts = c.fetchall()
     
-    for user_id, currency, pair_id, threshold, last_price in alerts:
+    for user_id, currency, threshold, last_price in alerts:
         current_price = get_price(currency)
         if current_price and last_price:
             change_percent = ((current_price - last_price) / last_price) * 100
@@ -361,6 +406,7 @@ def main():
         application.add_handler(CommandHandler("remove", remove_alert))
         application.add_handler(CommandHandler("currencies", list_currencies))
         application.add_handler(CommandHandler("test", test_price))
+        application.add_handler(CommandHandler("debug", debug_api))
         
         # تنظیم چک دوره‌ای هشدارها (هر 30 ثانیه)
         job_queue = application.job_queue
