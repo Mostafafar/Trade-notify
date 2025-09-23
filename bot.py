@@ -12,7 +12,7 @@ from datetime import datetime
 import json
 
 # تنظیمات
-API_KEY = "b6134b647c9596fdb226129a6970f37ff00e21cb9656a6db9a931a734a008120"
+API_KEY = "ApiKeyosoODeI:3a757758f5793b7b2283ca5455a2a0f033c15b558602aee9dc18e2d4755f84bc"
 BASE_URL = "https://api.ramzinex.com/exchange/api/v1.0/exchange/products"
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"  # توکن ربات تلگرام خود را جایگزین کنید
 
