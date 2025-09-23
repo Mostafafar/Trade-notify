@@ -14,7 +14,7 @@ import json
 # تنظیمات
 API_KEY = "ApiKeyosoODeI:3a757758f5793b7b2283ca5455a2a0f033c15b558602aee9dc18e2d4755f84bc"
 BASE_URL = "https://api.ramzinex.com/exchange/api/v1.0/exchange/products"
-TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"  # توکن ربات تلگرام خود را جایگزین کنید
+TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
 # تنظیمات لاگ
 logging.basicConfig(
@@ -35,26 +35,103 @@ def init_db():
     conn.close()
 
 def get_price(currency_symbol):
-    """دریافت قیمت از رمزینکس"""
+    """دریافت قیمت از رمزینکس با API جدید"""
     try:
-        response = requests.get(BASE_URL)
+        headers = {
+            'Authorization2': f'Bearer {API_KEY}',
+            'x-api-key': API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(BASE_URL, headers=headers)
+        logger.info(f"API Response Status: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
-            for product in data.get('data', []):
-                if product.get('currency2', {}).get('symbol') == currency_symbol:
-                    return float(product['price'])
+            logger.info(f"API Response Data: {json.dumps(data, ensure_ascii=False)[:500]}...")
+            
+            # بررسی ساختار مختلف پاسخ API
+            if 'data' in data:
+                for product in data['data']:
+                    # بررسی ساختارهای مختلف برای نماد ارز
+                    currency_info = product.get('currency2', {})
+                    symbol = currency_info.get('symbol', '').upper()
+                    
+                    # اگر در currency2 پیدا نشد، در خود محصول بررسی کن
+                    if not symbol:
+                        symbol = product.get('symbol', '').upper()
+                    
+                    if symbol == currency_symbol.upper():
+                        price = product.get('price')
+                        if price:
+                            return float(price)
+            
+            # اگر ساختار متفاوت است
+            for product in data:
+                symbol = product.get('symbol', '').upper()
+                if symbol == currency_symbol.upper():
+                    price = product.get('price')
+                    if price:
+                        return float(price)
+                        
+        else:
+            logger.error(f"API Error: {response.status_code} - {response.text}")
+            
         return None
     except Exception as e:
         logger.error(f"Error getting price: {e}")
         return None
 
+def get_all_currencies():
+    """دریافت لیست تمام ارزها از رمزینکس"""
+    try:
+        headers = {
+            'Authorization2': f'Bearer {API_KEY}',
+            'x-api-key': API_KEY,
+            'Content-Type': 'application/json'
+        }
+        
+        response = requests.get(BASE_URL, headers=headers)
+        logger.info(f"Currencies API Status: {response.status_code}")
+        
+        if response.status_code == 200:
+            data = response.json()
+            currencies = set()
+            
+            # بررسی ساختارهای مختلف
+            if 'data' in data:
+                for product in data['data']:
+                    currency_info = product.get('currency2', {})
+                    symbol = currency_info.get('symbol', '').upper()
+                    if symbol:
+                        currencies.add(symbol)
+                    
+                    # همچنین نماد محصول را نیز بررسی کن
+                    product_symbol = product.get('symbol', '').upper()
+                    if product_symbol:
+                        currencies.add(product_symbol)
+            else:
+                for product in data:
+                    symbol = product.get('symbol', '').upper()
+                    if symbol:
+                        currencies.add(symbol)
+            
+            return sorted(list(currencies))
+        else:
+            logger.error(f"Currencies API Error: {response.status_code}")
+            return []
+            
+    except Exception as e:
+        logger.error(f"Error getting currencies: {e}")
+        return []
+
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
     user_id = update.effective_user.id
     welcome_text = """
-🤖 **ربات اطلاع‌رسانی تغییرات قیمت**
+🤖 **ربات اطلاع‌رسانی تغییرات قیمت رمزینکس**
 
-با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف هشدار دریافت کنید.
+با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف در صرافی رمزینکس هشدار دریافت کنید.
 
 📋 **دستورات موجود:**
 /set [ارز] [درصد] - تنظیم هشدار (مثال: `/set btc 5`)
@@ -65,6 +142,8 @@ async def start(update: Update, context: CallbackContext):
 💡 **مثال:**
 `/set btc 5` - هشدار برای تغییر ۵٪ بیت‌کوین
 `/set eth 10` - هشدار برای تغییر ۱۰٪ اتریوم
+
+🔗 **پشتیبانی از صرافی رمزینکس**
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
@@ -87,7 +166,15 @@ async def set_alert(update: Update, context: CallbackContext):
     # بررسی وجود ارز
     current_price = get_price(currency)
     if current_price is None:
-        await update.message.reply_text(f"❌ ارز {currency} یافت نشد. از دستور /currencies استفاده کنید.")
+        currencies_list = get_all_currencies()
+        if currencies_list:
+            await update.message.reply_text(
+                f"❌ ارز {currency} یافت نشد.\n\n"
+                f"✅ ارزهای موجود: {', '.join(currencies_list[:10])}\n"
+                f"برای دیدن لیست کامل از /currencies استفاده کنید."
+            )
+        else:
+            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور")
         return
     
     # ذخیره در دیتابیس
@@ -165,24 +252,22 @@ async def remove_alert(update: Update, context: CallbackContext):
 async def list_currencies(update: Update, context: CallbackContext):
     """لیست ارزهای قابل دسترسی"""
     try:
-        response = requests.get(BASE_URL)
-        if response.status_code == 200:
-            data = response.json()
-            currencies = []
-            for product in data.get('data', []):
-                currency_info = product.get('currency2', {})
-                symbol = currency_info.get('symbol')
-                if symbol:
-                    currencies.append(symbol)
+        currencies = get_all_currencies()
+        
+        if currencies:
+            # تقسیم لیست به بخش‌های کوچکتر
+            chunk_size = 15
+            chunks = [currencies[i:i + chunk_size] for i in range(0, len(currencies), chunk_size)]
             
-            currencies.sort()
-            text = "💰 **ارزهای قابل دسترسی:**\n\n" + ", ".join(currencies[:20])
-            await update.message.reply_text(text, parse_mode='Markdown')
+            for i, chunk in enumerate(chunks):
+                text = f"💰 **ارزهای قابل دسترسی (قسمت {i+1}):**\n\n" + ", ".join(chunk)
+                await update.message.reply_text(text, parse_mode='Markdown')
         else:
-            await update.message.reply_text("❌ خطا در دریافت لیست ارزها")
+            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور رمزینکس")
+            
     except Exception as e:
-        logger.error(f"Error getting currencies: {e}")
-        await update.message.reply_text("❌ خطا در ارتباط با سرور")
+        logger.error(f"Error in list_currencies: {e}")
+        await update.message.reply_text("❌ خطا در ارتباط با سرور رمزینکس")
 
 async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
@@ -202,13 +287,11 @@ async def check_alerts(context: CallbackContext):
                     # ارسال پیام
                     if change_percent > 0:
                         emoji = "📈"
-                        direction = "صعود"
                     else:
                         emoji = "📉"
-                        direction = "نزول"
                     
                     message = (
-                        f"{emoji} **هشدار قیمت!**\n\n"
+                        f"{emoji} **هشدار قیمت رمزینکس!**\n\n"
                         f"• ارز: {currency}\n"
                         f"• تغییر: {change_percent:+.1f}%\n"
                         f"• قیمت قبلی: {last_price:,.0f} تومان\n"
@@ -247,10 +330,6 @@ def main():
         application.add_handler(CommandHandler("remove", remove_alert))
         application.add_handler(CommandHandler("currencies", list_currencies))
         
-        # بررسی وجود job_queue
-        if application.job_queue is None:
-            application.job_queue = application.bot.job_queue
-            
         # تنظیم چک دوره‌ای هشدارها (هر 30 ثانیه)
         job_queue = application.job_queue
         job_queue.run_repeating(check_alerts, interval=30, first=10)
