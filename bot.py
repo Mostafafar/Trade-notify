@@ -10,7 +10,7 @@ import sqlite3
 from datetime import datetime
 
 # تنظیمات
-BASE_URL = "https://publicapi.ramzinex.com/exchange/api/v2.0/exchange"
+BASE_URL = "https://api.ramzinex.com/exchange/api/v1.0/exchange"
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
 # تنظیمات لاگ
@@ -25,72 +25,100 @@ def init_db():
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (user_id INTEGER, currency TEXT, pair_id INTEGER, threshold REAL, 
+                 (user_id INTEGER, currency TEXT, threshold REAL, 
                   last_price REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   PRIMARY KEY (user_id, currency))''')
     conn.commit()
     conn.close()
 
-def get_all_pairs():
-    """دریافت اطلاعات تمام جفت‌ارزها از API رمزینکس"""
+def get_markets_data():
+    """دریافت اطلاعات بازار از رمزینکس"""
     try:
-        response = requests.get(f"{BASE_URL}/pairs")
-        logger.info(f"Pairs API Status: {response.status_code}")
+        # استفاده از endpoint عمومی برای دریافت اطلاعات بازار
+        response = requests.get(f"{BASE_URL}/markets")
+        logger.info(f"Markets API Status: {response.status_code}")
+        
         if response.status_code == 200:
             data = response.json()
-            if data.get('status') == 0 and 'data' in data and 'pairs' in data['data']:
-                return data['data']['pairs']
-            logger.error(f"Unexpected pairs data structure: {data}")
+            logger.info(f"Markets response type: {type(data)}")
+            
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict) and 'data' in data:
+                return data['data']
+            else:
+                logger.error(f"Unexpected markets data structure: {data}")
+                return []
+        else:
+            logger.error(f"Markets API Error: {response.status_code} - {response.text[:200]}")
             return []
-        logger.error(f"Pairs API Error: {response.status_code} - {response.text[:200]}")
-        return []
     except Exception as e:
-        logger.error(f"Error getting pairs: {e}")
+        logger.error(f"Error getting markets data: {e}")
         return []
-
-def get_currency_pair_id(currency_symbol):
-    """یافتن pair_id مربوط به یک ارز خاص"""
-    try:
-        pairs = get_all_pairs()
-        currency_symbol = currency_symbol.upper()
-        for pair in pairs:
-            base_currency = pair.get('base_currency', {}).get('symbol', {}).get('en', '').upper()
-            if base_currency == currency_symbol:
-                return pair['id']
-        logger.warning(f"No pair_id found for {currency_symbol}")
-        return None
-    except Exception as e:
-        logger.error(f"Error finding pair_id for {currency_symbol}: {e}")
-        return None
 
 def get_price(currency_symbol):
-    """دریافت قیمت از رمزینکس با استفاده از API معاملات"""
+    """دریافت قیمت از اطلاعات بازار رمزینکس"""
     try:
-        pair_id = get_currency_pair_id(currency_symbol)
-        if not pair_id:
-            logger.warning(f"No pair_id found for {currency_symbol}")
+        markets = get_markets_data()
+        if not markets:
+            logger.error("No markets data available")
             return None
         
-        # فرض: endpoint مشابه در v2.0 وجود دارد
-        response = requests.get(f"{BASE_URL}/orderbooks/{pair_id}/trades")
-        logger.info(f"Price API Status for {currency_symbol} (pair_id: {pair_id}): {response.status_code}")
+        currency_symbol = currency_symbol.upper()
+        logger.info(f"Searching for currency: {currency_symbol}")
+        logger.info(f"Number of markets: {len(markets)}")
         
-        if response.status_code == 200:
-            data = response.json()
-            logger.debug(f"API response for {currency_symbol}: {data}")
-            if data.get('status') == 0 and data.get('data'):
-                trades = data.get('data', [])
-                if trades:
-                    last_trade = trades[0]
-                    price = last_trade.get('price') or last_trade.get('last_price')
-                    if price:
-                        logger.info(f"Found price for {currency_symbol}: {price}")
-                        return float(price)
-                logger.warning(f"No trades found for {currency_symbol}")
-            logger.warning(f"No valid price data found for {currency_symbol}")
-            return None
-        logger.error(f"Price API Error for {currency_symbol}: {response.status_code} - {response.text[:200]}")
+        # جستجو در بازارها
+        for market in markets:
+            # بررسی ساختارهای مختلف بازار
+            symbol = None
+            
+            # حالت 1: فیلد symbol مستقیم
+            if 'symbol' in market:
+                symbol = market['symbol'].upper()
+                # اگر symbol به صورت BTC/IRT باشد، بخش اول را بگیریم
+                if '/' in symbol:
+                    symbol = symbol.split('/')[0]
+            
+            # حالت 2: فیلد base_currency_symbol
+            elif 'base_currency_symbol' in market:
+                symbol = market['base_currency_symbol'].upper()
+            
+            # حالت 3: فیلد currency1
+            elif 'currency1' in market and isinstance(market['currency1'], dict):
+                symbol = market['currency1'].get('symbol', '').upper()
+            
+            # حالت 4: فیلد name
+            elif 'name' in market and isinstance(market['name'], dict):
+                name = market['name'].get('en', '').upper()
+                if '/' in name:
+                    symbol = name.split('/')[0]
+            
+            if symbol == currency_symbol:
+                # استخراج قیمت از فیلدهای مختلف
+                price = None
+                
+                if 'price' in market:
+                    price = market['price']
+                elif 'last_price' in market:
+                    price = market['last_price']
+                elif 'lastPrice' in market:
+                    price = market['lastPrice']
+                elif 'latest' in market:
+                    price = market['latest']
+                elif 'close' in market:
+                    price = market['close']
+                
+                if price is not None:
+                    logger.info(f"Found {currency_symbol}: {price}")
+                    return float(price)
+        
+        logger.warning(f"Currency {currency_symbol} not found in markets")
+        # لاگ اولین بازار برای دیباگ
+        if markets and len(markets) > 0:
+            logger.info(f"First market sample: {markets[0]}")
         return None
+            
     except Exception as e:
         logger.error(f"Error getting price for {currency_symbol}: {e}")
         return None
@@ -98,43 +126,80 @@ def get_price(currency_symbol):
 def get_all_currencies():
     """دریافت لیست تمام ارزهای قابل معامله"""
     try:
-        pairs = get_all_pairs()
+        markets = get_markets_data()
         currencies = set()
-        for pair in pairs:
-            base_currency = pair.get('base_currency', {}).get('symbol', {}).get('en', '').upper()
-            currencies.add(base_currency)
+        
+        for market in markets:
+            symbol = None
+            
+            if 'symbol' in market:
+                symbol = market['symbol'].upper()
+                if '/' in symbol:
+                    symbol = symbol.split('/')[0]
+            elif 'base_currency_symbol' in market:
+                symbol = market['base_currency_symbol'].upper()
+            elif 'currency1' in market and isinstance(market['currency1'], dict):
+                symbol = market['currency1'].get('symbol', '').upper()
+            elif 'name' in market and isinstance(market['name'], dict):
+                name = market['name'].get('en', '').upper()
+                if '/' in name:
+                    symbol = name.split('/')[0]
+            
+            if symbol:
+                currencies.add(symbol)
+        
         return sorted(list(currencies))
     except Exception as e:
         logger.error(f"Error getting currencies: {e}")
         return []
 
+async def start(update: Update, context: CallbackContext):
+    """دستور شروع"""
+    welcome_text = """
+🤖 **ربات اطلاع‌رسانی تغییرات قیمت رمزینکس**
+
+با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف در صرافی رمزینکس هشدار دریافت کنید.
+
+📋 **دستورات موجود:**
+/set [ارز] [درصد] - تنظیم هشدار (مثال: `/set btc 5`)
+/list - نمایش هشدارهای فعال
+/remove [ارز] - حذف هشدار (مثال: `/remove btc`)
+/currencies - لیست ارزهای قابل دسترسی
+/test [ارز] - تست دریافت قیمت یک ارز (مثال: `/test btc`)
+
+💡 **مثال:**
+`/set btc 5` - هشدار برای تغییر ۵٪ بیت‌کوین
+`/set eth 10` - هشدار برای تغییر ۱۰٪ اتریوم
+
+🔗 **پشتیبانی از صرافی رمزینکس**
+"""
+    await update.message.reply_text(welcome_text, parse_mode='Markdown')
+
 async def test_price(update: Update, context: CallbackContext):
     """تست دریافت قیمت یک ارز"""
     args = context.args
+    
     if len(args) != 1:
         await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/test btc`", parse_mode='Markdown')
         return
     
     currency = args[0].upper()
+    
     await update.message.reply_text(f"🔍 در حال دریافت قیمت {currency}...")
     
-    pair_id = get_currency_pair_id(currency)
-    if not pair_id:
+    price = get_price(currency)
+    
+    if price is not None:
+        await update.message.reply_text(f"✅ قیمت {currency}: {price:,.0f} تومان")
+    else:
         currencies = get_all_currencies()
         if currencies:
             await update.message.reply_text(
                 f"❌ ارز {currency} یافت نشد.\n\n"
-                f"✅ ارزهای موجود: {', '.join(currencies)}"
+                f"✅ ارزهای موجود: {', '.join(currencies[:15])}"
             )
         else:
-            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور")
-        return
-    
-    price = get_price(currency)
-    if price is not None:
-        await update.message.reply_text(f"✅ قیمت {currency}: {price:,.0f} تومان")
-    else:
-        await update.message.reply_text(f"❌ خطا در دریافت قیمت {currency}. لطفاً دوباره امتحان کنید.")
+            await update.message.reply_text("❌ خطا در اتصال به API رمزینکس")
 
 async def set_alert(update: Update, context: CallbackContext):
     """تنظیم هشدار جدید"""
@@ -155,31 +220,31 @@ async def set_alert(update: Update, context: CallbackContext):
         await update.message.reply_text("❌ درصد باید یک عدد باشد.")
         return
     
-    pair_id = get_currency_pair_id(currency)
-    if not pair_id:
+    # بررسی وجود ارز
+    current_price = get_price(currency)
+    if current_price is None:
         currencies_list = get_all_currencies()
         if currencies_list:
             await update.message.reply_text(
                 f"❌ ارز {currency} یافت نشد.\n\n"
-                f"✅ ارزهای موجود: {', '.join(currencies_list)}"
+                f"✅ ارزهای موجود: {', '.join(currencies_list[:10])}\n"
+                f"برای دیدن لیست کامل از /currencies استفاده کنید."
             )
         else:
             await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور")
         return
     
-    current_price = get_price(currency)
-    if current_price is None:
-        await update.message.reply_text("❌ خطا در دریافت قیمت فعلی از سرور رمزینکس")
-        return
-    
+    # ذخیره در دیتابیس
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
+    
     try:
         c.execute('''INSERT OR REPLACE INTO alerts 
-                     (user_id, currency, pair_id, threshold, last_price) 
-                     VALUES (?, ?, ?, ?, ?)''', 
-                 (user_id, currency, pair_id, threshold, current_price))
+                     (user_id, currency, threshold, last_price) 
+                     VALUES (?, ?, ?, ?)''', 
+                 (user_id, currency, threshold, current_price))
         conn.commit()
+        
         await update.message.reply_text(
             f"✅ هشدار تنظیم شد!\n"
             f"• ارز: {currency}\n"
@@ -196,6 +261,7 @@ async def set_alert(update: Update, context: CallbackContext):
 async def list_alerts(update: Update, context: CallbackContext):
     """نمایش هشدارهای فعال"""
     user_id = update.effective_user.id
+    
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
     c.execute('SELECT currency, threshold, last_price FROM alerts WHERE user_id = ?', (user_id,))
@@ -227,6 +293,7 @@ async def remove_alert(update: Update, context: CallbackContext):
         return
     
     currency = args[0].upper()
+    
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
     c.execute('DELETE FROM alerts WHERE user_id = ? AND currency = ?', (user_id, currency))
@@ -243,12 +310,19 @@ async def list_currencies(update: Update, context: CallbackContext):
     """لیست ارزهای قابل دسترسی"""
     try:
         currencies = get_all_currencies()
+        
         if currencies:
             text = f"💰 **ارزهای قابل دسترسی ({len(currencies)} ارز):**\n\n"
-            text += ", ".join(currencies)
+            # نمایش 20 ارز اول
+            text += ", ".join(currencies[:20])
+            
+            if len(currencies) > 20:
+                text += f"\n\n... و {len(currencies) - 20} ارز دیگر"
+            
             await update.message.reply_text(text, parse_mode='Markdown')
         else:
             await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور رمزینکس")
+            
     except Exception as e:
         logger.error(f"Error in list_currencies: {e}")
         await update.message.reply_text("❌ خطا در ارتباط با سرور رمزینکس")
@@ -257,16 +331,23 @@ async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
-    c.execute('SELECT user_id, currency, pair_id, threshold, last_price FROM alerts')
+    c.execute('SELECT user_id, currency, threshold, last_price FROM alerts')
     alerts = c.fetchall()
     
-    for user_id, currency, pair_id, threshold, last_price in alerts:
+    for user_id, currency, threshold, last_price in alerts:
         current_price = get_price(currency)
         if current_price and last_price:
             change_percent = ((current_price - last_price) / last_price) * 100
+            
+            # بررسی آیا تغییر از آستانه گذشته است
             if abs(change_percent) >= threshold:
                 try:
-                    emoji = "📈" if change_percent > 0 else "📉"
+                    # ارسال پیام
+                    if change_percent > 0:
+                        emoji = "📈"
+                    else:
+                        emoji = "📉"
+                    
                     message = (
                         f"{emoji} **هشدار قیمت رمزینکس!**\n\n"
                         f"• ارز: {currency}\n"
@@ -276,10 +357,15 @@ async def check_alerts(context: CallbackContext):
                         f"• آستانه: {threshold}%\n"
                         f"• زمان: {datetime.now().strftime('%H:%M:%S')}"
                     )
+                    
                     await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
+                    
+                    # آپدیت قیمت آخر
                     c.execute('UPDATE alerts SET last_price = ? WHERE user_id = ? AND currency = ?',
                              (current_price, user_id, currency))
+                    
                     logger.info(f"Alert sent to {user_id} for {currency}: {change_percent:.1f}%")
+                    
                 except Exception as e:
                     logger.error(f"Error sending alert to {user_id}: {e}")
     
@@ -287,19 +373,30 @@ async def check_alerts(context: CallbackContext):
     conn.close()
 
 def main():
+    """تابع اصلی"""
+    # مقداردهی اولیه دیتابیس
     init_db()
+    
     try:
+        # ایجاد اپلیکیشن تلگرام
         application = Application.builder().token(TELEGRAM_TOKEN).build()
+        
+        # اضافه کردن هندلرها
         application.add_handler(CommandHandler("start", start))
         application.add_handler(CommandHandler("set", set_alert))
         application.add_handler(CommandHandler("list", list_alerts))
         application.add_handler(CommandHandler("remove", remove_alert))
         application.add_handler(CommandHandler("currencies", list_currencies))
         application.add_handler(CommandHandler("test", test_price))
+        
+        # تنظیم چک دوره‌ای هشدارها (هر 30 ثانیه)
         job_queue = application.job_queue
         job_queue.run_repeating(check_alerts, interval=30, first=10)
+        
+        # شروع ربات
         application.run_polling()
         logger.info("Bot started successfully")
+        
     except Exception as e:
         logger.error(f"Failed to start bot: {e}")
 
