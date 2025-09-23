@@ -8,7 +8,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackContext
 import sqlite3
 from datetime import datetime
-import os
+import json  # اضافه کردن import json
 
 # تنظیمات
 BASE_URL = "https://publicapi.ramzinex.com/exchange/api/v1.0/exchange"
@@ -92,34 +92,53 @@ def get_price(currency_symbol):
             logger.warning(f"No pair_id mapping found for {currency_symbol}")
             return None
         
-        # ابتدا ساختار پاسخ را دیباگ می‌کنیم
-        debug_data = debug_api_response(pair_id)
-        if not debug_data:
-            return None
+        # استفاده از endpoint معاملات برای دریافت آخرین قیمت
+        response = requests.get(f"{BASE_URL}/orderbooks/{pair_id}/trades")
+        logger.info(f"Price API Status for {currency_symbol} (pair_id: {pair_id}): {response.status_code}")
         
-        # بررسی ساختار پاسخ بر اساس دیباگ
-        if isinstance(debug_data, dict) and debug_data.get('status') == 0:
-            trades = debug_data.get('data', [])
-            if trades and len(trades) > 0:
-                # آخرین معامله را به عنوان قیمت فعلی در نظر می‌گیریم
-                last_trade = trades[0]
+        if response.status_code == 200:
+            data = response.json()
+            
+            # بررسی ساختار پاسخ
+            if isinstance(data, dict):
+                logger.info(f"API Response structure: {list(data.keys())}")
                 
-                # استخراج قیمت از آخرین معامله - بررسی فیلدهای مختلف
-                price = None
-                if 'price' in last_trade:
-                    price = last_trade['price']
-                elif 'last_price' in last_trade:
-                    price = last_trade['last_price']
-                elif 'amount' in last_trade:  # ممکن است فیلد amount قیمت باشد
-                    price = last_trade['amount']
-                elif 'value' in last_trade:   # یا فیلد value
-                    price = last_trade['value']
+                # بررسی status
+                status = data.get('status')
+                logger.info(f"API Status: {status}")
                 
-                if price:
-                    logger.info(f"Found price for {currency_symbol}: {price}")
-                    return float(price)
+                # بررسی data
+                trades_data = data.get('data', [])
+                logger.info(f"Trades data type: {type(trades_data)}, length: {len(trades_data)}")
+                
+                if isinstance(trades_data, list) and len(trades_data) > 0:
+                    # بررسی ساختار اولین معامله
+                    first_trade = trades_data[0]
+                    logger.info(f"First trade structure: {list(first_trade.keys())}")
+                    logger.info(f"First trade values: {first_trade}")
+                    
+                    # استخراج قیمت از آخرین معامله - بررسی فیلدهای مختلف
+                    price = None
+                    if 'price' in first_trade:
+                        price = first_trade['price']
+                    elif 'last_price' in first_trade:
+                        price = first_trade['last_price']
+                    elif 'amount' in first_trade:
+                        price = first_trade['amount']
+                    elif 'value' in first_trade:
+                        price = first_trade['value']
+                    elif 'trade_price' in first_trade:
+                        price = first_trade['trade_price']
+                    
+                    if price:
+                        logger.info(f"Found price for {currency_symbol}: {price}")
+                        return float(price)
+                    else:
+                        logger.warning(f"No price field found in trade data. Available fields: {list(first_trade.keys())}")
                 else:
-                    logger.warning(f"No price field found in trade data: {last_trade}")
+                    logger.warning(f"No trades data found or empty list: {trades_data}")
+            else:
+                logger.warning(f"Unexpected data structure: {type(data)}")
         
         logger.warning(f"No valid price data found for {currency_symbol}")
         return None
@@ -130,8 +149,12 @@ def get_price(currency_symbol):
 
 def get_all_currencies():
     """دریافت لیست تمام ارزهای قابل معامله"""
-    currencies = list(get_currency_pair_id.keys())
-    return sorted(currencies)
+    currency_mapping = {
+        'BTC': 11,    'ETH': 12,    'USDT': 21,   'IRT': 1,
+        'LTC': 13,    'XRP': 14,    'ADA': 15,    'DOT': 16,
+        'BCH': 17,    'LINK': 18,   'DOGE': 19,   'MATIC': 20,
+    }
+    return sorted(currency_mapping.keys())
 
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
@@ -173,25 +196,37 @@ async def debug_api(update: Update, context: CallbackContext):
     
     await update.message.reply_text(f"🔧 در حال دیباگ API برای {currency} (pair_id: {pair_id})...")
     
-    debug_data = debug_api_response(pair_id)
-    
-    if debug_data:
-        # نمایش خلاصه‌ای از ساختار پاسخ
-        summary = f"✅ پاسخ API برای {currency}:\n\n"
-        summary += f"• Status: {debug_data.get('status', 'N/A')}\n"
+    try:
+        response = requests.get(f"{BASE_URL}/orderbooks/{pair_id}/trades")
         
-        if 'data' in debug_data:
-            data = debug_data['data']
-            summary += f"• Data type: {type(data)}\n"
-            if isinstance(data, list):
-                summary += f"• Number of trades: {len(data)}\n"
-                if len(data) > 0:
-                    summary += f"• First trade keys: {list(data[0].keys())}\n"
-                    summary += f"• First trade values: {data[0]}\n"
-        
-        await update.message.reply_text(summary)
-    else:
-        await update.message.reply_text("❌ خطا در دریافت داده از API")
+        if response.status_code == 200:
+            data = response.json()
+            
+            # نمایش خلاصه‌ای از ساختار پاسخ
+            summary = f"✅ پاسخ API برای {currency} (pair_id: {pair_id}):\n\n"
+            summary += f"• Status Code: {response.status_code}\n"
+            summary += f"• Response Status: {data.get('status', 'N/A')}\n"
+            
+            if 'data' in data:
+                trades_data = data['data']
+                summary += f"• Data Type: {type(trades_data)}\n"
+                if isinstance(trades_data, list):
+                    summary += f"• Number of Trades: {len(trades_data)}\n"
+                    if len(trades_data) > 0:
+                        first_trade = trades_data[0]
+                        summary += f"• First Trade Keys: {list(first_trade.keys())}\n"
+                        summary += f"• First Trade Values: {first_trade}\n"
+                else:
+                    summary += f"• Data Content: {trades_data}\n"
+            else:
+                summary += "• No 'data' field in response\n"
+            
+            await update.message.reply_text(summary)
+        else:
+            await update.message.reply_text(f"❌ خطا در دریافت داده از API: {response.status_code}")
+            
+    except Exception as e:
+        await update.message.reply_text(f"❌ خطا در دیباگ: {str(e)}")
 
 async def test_price(update: Update, context: CallbackContext):
     """تست دریافت قیمت یک ارز"""
@@ -213,7 +248,7 @@ async def test_price(update: Update, context: CallbackContext):
         currencies = get_all_currencies()
         if currencies:
             await update.message.reply_text(
-                f"❌ ارز {currency} یافت نشد.\n\n"
+                f"❌ ارز {currency} یافت نشد یا خطا در دریافت قیمت.\n\n"
                 f"✅ ارزهای موجود: {', '.join(currencies)}"
             )
         else:
