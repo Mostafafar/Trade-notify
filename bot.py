@@ -11,7 +11,7 @@ from datetime import datetime
 import json
 
 # تنظیمات
-BASE_URL = "https://freecryptoapi.com/api/v1"
+BASE_URL = "https://freecryptoapi.com/api/v1"  # تأیید کنید که این URL صحیح است
 API_KEY = "pdb9zpy2vxpdijlyx5x5"
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
@@ -49,9 +49,9 @@ def get_currency_pairs():
         return currency_cache
     
     try:
-        # استفاده از اندپوینت /getCryptoList برای لیست ارزها
+        # فرض بر وجود اندپوینت /v1/markets برای لیست ارزها
         params = {'api_key': API_KEY}
-        response = requests.get(f"{BASE_URL}/getCryptoList", params=params, timeout=10)
+        response = requests.get(f"{BASE_URL}/markets", params=params, timeout=10)
         logger.info(f"Market API Status: {response.status_code}")
         
         if response.status_code == 200:
@@ -66,19 +66,18 @@ def get_currency_pairs():
                 for crypto in crypto_list:
                     try:
                         symbol = crypto.get('symbol', '').upper()
-                        name_fa = crypto.get('name_fa', 'N/A')  # فرض بر وجود نام فارسی، در غیر این صورت N/A
-                        name_en = crypto.get('name', 'N/A')  # نام انگلیسی معمولاً 'name'
+                        name_en = crypto.get('name', 'N/A')
+                        name_fa = crypto.get('name_fa', name_en)  # اگر نام فارسی نیست، از انگلیسی استفاده شود
                         
                         if symbol:
-                            # pair_id را به عنوان index یا id استفاده می‌کنیم، اینجا None قرار می‌دهیم یا index
                             pair_id = crypto.get('id', len(currency_mapping) + 1)
                             currency_mapping[symbol] = pair_id
                             pair_details[pair_id] = {
                                 'base_currency': symbol,
-                                'quote_currency': 'USDT',  # فرض بر USDT به عنوان quote پیش‌فرض
+                                'quote_currency': crypto.get('quote_currency', 'USDT'),
                                 'name_fa': name_fa,
                                 'name_en': name_en,
-                                'last_price': None,  # قیمت بعداً به‌روزرسانی می‌شود
+                                'last_price': crypto.get('price', None),
                                 'volume': crypto.get('volume', None),
                                 'change_percent': crypto.get('change_24h', None)
                             }
@@ -101,8 +100,7 @@ def get_currency_pairs():
             logger.error(f"Unexpected response structure: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
         
         logger.error(f"API Error: {response.status_code}")
-        if response.status_code != 200:
-            logger.error(f"Response text: {response.text[:500]}")
+        logger.error(f"Response text: {response.text[:500]}")
         return None
             
     except Exception as e:
@@ -123,7 +121,7 @@ def get_price(currency_symbol):
     try:
         currency_upper = currency_symbol.upper()
         
-        # ابتدا از کش استفاده می‌کنیم (اگر قیمت به‌روزرسانی شده باشد)
+        # ابتدا از کش استفاده می‌کنیم
         pairs_data = get_currency_pairs()
         if pairs_data:
             for pair_id, details in pairs_data['details'].items():
@@ -133,34 +131,35 @@ def get_price(currency_symbol):
                         logger.info(f"Found price for {currency_symbol} in cache: {price}")
                         return float(price)
         
-        # اگر در کش نبود، مستقیماً از API می‌گیریم با /getData
+        # اگر در کش نبود، از اندپوینت /v1/price استفاده می‌کنیم
         params = {
             'api_key': API_KEY,
             'symbol': currency_upper
         }
-        response = requests.get(f"{BASE_URL}/getData", params=params, timeout=10)
+        response = requests.get(f"{BASE_URL}/price", params=params, timeout=10)
         if response.status_code == 200:
             data = response.json()
             
             if isinstance(data, dict) and 'data' in data:
                 crypto_data = data['data']
+                price = None
                 if isinstance(crypto_data, list) and len(crypto_data) > 0:
-                    price = crypto_data[0].get('price')  # فرض بر فیلد 'price'
-                    if price:
-                        # به‌روزرسانی کش
-                        if pairs_data:
-                            pair_id = get_currency_pair_id(currency_upper)
-                            if pair_id:
-                                pairs_data['details'][pair_id]['last_price'] = float(price)
-                        logger.info(f"Found price for {currency_symbol}: {price}")
-                        return float(price)
+                    price = crypto_data[0].get('price')
                 elif isinstance(crypto_data, dict):
                     price = crypto_data.get('price')
-                    if price:
-                        logger.info(f"Found price for {currency_symbol}: {price}")
-                        return float(price)
+                
+                if price:
+                    # به‌روزرسانی کش
+                    if pairs_data:
+                        pair_id = get_currency_pair_id(currency_upper)
+                        if pair_id:
+                            pairs_data['details'][pair_id]['last_price'] = float(price)
+                    logger.info(f"Found price for {currency_symbol}: {price}")
+                    return float(price)
         
         logger.warning(f"No price found for {currency_symbol}")
+        logger.error(f"Price API Status: {response.status_code}")
+        logger.error(f"Response text: {response.text[:500]}")
         return None
             
     except Exception as e:
@@ -171,8 +170,9 @@ def get_all_currencies():
     """دریافت لیست تمام ارزهای قابل معامله"""
     pairs_data = get_currency_pairs()
     if not pairs_data:
-        # لیست پیش‌فرض ارزهای معروف
+        # لیست پیش‌فرض در صورت خرابی API
         default_currencies = ['BTC', 'ETH', 'USDT', 'ADA', 'DOT', 'LTC', 'BCH', 'XRP', 'EOS', 'TRX']
+        logger.warning("Using default currency list due to API failure")
         return default_currencies
     
     return sorted(pairs_data['mapping'].keys())
@@ -212,7 +212,7 @@ async def currency_info(update: Update, context: CallbackContext):
     pairs_data = get_currency_pairs()
     
     if not pairs_data:
-        await update.message.reply_text("❌ خطا در دریافت اطلاعات از سرور")
+        await update.message.reply_text("❌ خطا در دریافت اطلاعات از سرور FreeCryptoAPI. لطفاً بعداً تلاش کنید.")
         return
     
     pair_id = get_currency_pair_id(currency)
@@ -231,9 +231,8 @@ async def currency_info(update: Update, context: CallbackContext):
     info_text += f"• ارز متقابل: {pair_detail.get('quote_currency', 'N/A')}\n"
     
     if price:
-        info_text += f"• قیمت فعلی: ${price:,.2f} USD\n"  # فرض بر USD
+        info_text += f"• قیمت فعلی: ${price:,.2f} USD\n"
         
-        # اطلاعات اضافی اگر موجود باشد
         change_percent = pair_detail.get('change_percent')
         volume = pair_detail.get('volume')
         
@@ -258,23 +257,6 @@ async def test_price(update: Update, context: CallbackContext):
     
     await update.message.reply_text(f"🔍 در حال دریافت قیمت {currency}...")
     
-    # تست API
-    try:
-        params = {'api_key': API_KEY}
-        response = requests.get(f"{BASE_URL}/getCryptoList", params=params, timeout=10)
-        logger.info(f"Direct API test - Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            data = response.json()
-            logger.info(f"API Response type: {type(data)}")
-            if isinstance(data, dict) and 'data' in data:
-                logger.info(f"Number of cryptos: {len(data['data'])}")
-                if len(data['data']) > 0:
-                    sample_crypto = data['data'][0]
-                    logger.info(f"Sample crypto keys: {list(sample_crypto.keys())}")
-    except Exception as e:
-        logger.error(f"Direct API test failed: {e}")
-    
     price = get_price(currency)
     
     if price is not None:
@@ -283,7 +265,7 @@ async def test_price(update: Update, context: CallbackContext):
         currencies = get_all_currencies()
         await update.message.reply_text(
             f"❌ ارز {currency} یافت نشد یا خطا در دریافت قیمت.\n\n"
-            f"✅ ارزهای موجود: {', '.join(currencies[:20])} {'...' if len(currencies) > 20 else ''}\n"  # محدود به 20 برای جلوگیری از طولانی شدن
+            f"✅ ارزهای موجود: {', '.join(currencies[:20])} {'...' if len(currencies) > 20 else ''}\n"
             f"لطفاً از حروف لاتین استفاده کنید (مثال: BTC به جای بیت‌کوین)"
         )
 
@@ -398,7 +380,6 @@ async def list_currencies(update: Update, context: CallbackContext):
         
         if currencies:
             text = f"💰 **ارزهای قابل دسترسی ({len(currencies)} ارز):**\n\n"
-            # محدود به 50 ارز برای جلوگیری از طولانی شدن پیام
             display_currencies = currencies[:50]
             text += ", ".join(display_currencies)
             if len(currencies) > 50:
