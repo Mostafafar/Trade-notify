@@ -9,6 +9,7 @@ from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackContext
 import sqlite3
 from datetime import datetime
+import requests  # اضافه کردن requests برای fallback sync
 
 # تنظیمات
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
@@ -42,7 +43,12 @@ class RamzinexWebSocket:
         self.price_data = {}
         self.market_mapping = {}
         self.reconnect_delay = 5
+        self.loop = None
         
+    def set_loop(self, loop):
+        """تنظیم event loop برای استفاده در توابع sync"""
+        self.loop = loop
+    
     async def connect(self):
         """اتصال به WebSocket رمزینکس"""
         while True:
@@ -68,6 +74,8 @@ class RamzinexWebSocket:
             except Exception as e:
                 logger.error(f"WebSocket connection error: {e}")
                 self.connected = False
+                if self.session:
+                    await self.session.close()
                 await asyncio.sleep(self.reconnect_delay)
     
     async def initialize_markets(self):
@@ -174,10 +182,31 @@ class RamzinexWebSocket:
                 return price_info['price']
         
         # اگر داده WebSocket قدیمی یا موجود نبود، از API معمولی استفاده می‌کنیم
-        return asyncio.run(self.get_price_from_api(currency))
+        return self.get_price_from_api_sync(currency)
     
-    async def get_price_from_api(self, currency_symbol):
-        """دریافت قیمت از API معمولی (fallback)"""
+    def get_price_from_api_sync(self, currency_symbol):
+        """دریافت قیمت از API معمولی (fallback) - نسخه sync"""
+        try:
+            response = requests.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                markets = data if isinstance(data, list) else data.get('data', [])
+                
+                for market in markets:
+                    base_currency = market.get('base_asset', {}).get('symbol', '').upper()
+                    if base_currency == currency_symbol:
+                        price = market.get('last_price')
+                        if price:
+                            return float(price)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting price from API for {currency_symbol}: {e}")
+            return None
+    
+    async def get_price_from_api_async(self, currency_symbol):
+        """دریافت قیمت از API معمولی (fallback) - نسخه async"""
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=5) as response:
@@ -204,7 +233,12 @@ class RamzinexWebSocket:
         for currency, market_id in self.market_mapping.items():
             if currency.isalpha():  # فقط اسم ارزها (نه IDها)
                 currencies.append(currency)
-        return sorted(currencies) if currencies else ['BTC', 'ETH', 'USDT', 'ADA', 'DOT', 'LTC', 'BCH', 'XRP', 'EOS', 'TRX']
+        
+        if not currencies:
+            # Fallback به لیست پیش‌فرض اگر mapping خالی است
+            return ['BTC', 'ETH', 'USDT', 'ADA', 'DOT', 'LTC', 'BCH', 'XRP', 'EOS', 'TRX']
+        
+        return sorted(currencies)
 
 # ایجاد نمونه WebSocket جهانی
 websocket_manager = RamzinexWebSocket()
@@ -392,12 +426,35 @@ async def currency_info(update: Update, context: CallbackContext):
     pair_id = websocket_manager.market_mapping.get(currency)
     
     if not pair_id:
+        # سعی می‌کنیم از API اطلاعات بگیریم
+        try:
+            response = requests.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=5)
+            if response.status_code == 200:
+                data = response.json()
+                markets = data if isinstance(data, list) else data.get('data', [])
+                
+                for market in markets:
+                    base_currency = market.get('base_asset', {}).get('symbol', '').upper()
+                    if base_currency == currency:
+                        pair_id = market.get('id')
+                        name_fa = market.get('base_asset', {}).get('name_fa', 'N/A')
+                        name_en = market.get('base_asset', {}).get('name_en', 'N/A')
+                        quote_currency = market.get('quote_asset', {}).get('symbol', '').upper()
+                        break
+        except Exception as e:
+            logger.error(f"Error getting currency info: {e}")
+    
+    if not pair_id:
         await update.message.reply_text(f"❌ ارز {currency} یافت نشد.")
         return
     
     info_text = f"💰 **اطلاعات ارز {currency}**\n\n"
     info_text += f"• شناسه بازار: `{pair_id}`\n"
-    info_text += f"• ارز: {currency}\n"
+    
+    if 'name_fa' in locals():
+        info_text += f"• نام فارسی: {name_fa}\n"
+        info_text += f"• نام انگلیسی: {name_en}\n"
+        info_text += f"• ارز متقابل: {quote_currency}\n"
     
     if price:
         info_text += f"• قیمت فعلی: {price:,.0f} تومان\n"
@@ -462,9 +519,12 @@ def main():
     init_db()
     
     try:
-        # ایجاد event loop برای WebSocket
+        # ایجاد event loop
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        
+        # تنظیم loop برای websocket_manager
+        websocket_manager.set_loop(loop)
         
         # راه‌اندازی WebSocket در پس‌زمینه
         loop.create_task(start_websocket())
@@ -483,6 +543,8 @@ def main():
         job_queue.run_repeating(check_alerts, interval=30, first=10)
         
         logger.info("Starting bot with WebSocket support...")
+        
+        # اجرای application در loop فعلی
         application.run_polling()
         
     except Exception as e:
