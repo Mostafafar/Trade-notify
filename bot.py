@@ -10,8 +10,8 @@ import sqlite3
 from datetime import datetime
 import json
 
-# تنظیمات جدید
-BASE_URL = "https://freecryptoapi.com/api"
+# تنظیمات
+BASE_URL = "https://freecryptoapi.com/api/v1"
 API_KEY = "pdb9zpy2vxpdijlyx5x5"
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
@@ -40,7 +40,7 @@ def init_db():
     conn.close()
 
 def get_currency_pairs():
-    """دریافت لیست جفت‌ارزها از freecryptoapi.com"""
+    """دریافت لیست جفت‌ارزها از API FreeCryptoAPI"""
     global currency_cache, cache_timestamp
     
     # بررسی کش
@@ -49,41 +49,42 @@ def get_currency_pairs():
         return currency_cache
     
     try:
-        # استفاده از اندپوینت جدید
-        url = f"{BASE_URL}/v1?api_key={API_KEY}"
-        response = requests.get(url, timeout=10)
-        logger.info(f"API Status: {response.status_code}")
+        # استفاده از اندپوینت /getCryptoList برای لیست ارزها
+        params = {'api_key': API_KEY}
+        response = requests.get(f"{BASE_URL}/getCryptoList", params=params, timeout=10)
+        logger.info(f"Market API Status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
             logger.info(f"API Response type: {type(data)}")
             
-            if isinstance(data, list):
+            if isinstance(data, dict) and 'data' in data:
+                crypto_list = data['data']
                 currency_mapping = {}
                 pair_details = {}
                 
-                for currency_data in data:
+                for crypto in crypto_list:
                     try:
-                        symbol = currency_data.get('symbol', '').upper()
-                        price = currency_data.get('price', 0)
-                        change_24h = currency_data.get('change_24h', 0)
-                        volume_24h = currency_data.get('volume_24h', 0)
+                        symbol = crypto.get('symbol', '').upper()
+                        name_fa = crypto.get('name_fa', 'N/A')  # فرض بر وجود نام فارسی، در غیر این صورت N/A
+                        name_en = crypto.get('name', 'N/A')  # نام انگلیسی معمولاً 'name'
                         
                         if symbol:
-                            # ایجاد یک ID ساده برای ارز
-                            pair_id = hash(symbol) % 1000000
+                            # pair_id را به عنوان index یا id استفاده می‌کنیم، اینجا None قرار می‌دهیم یا index
+                            pair_id = crypto.get('id', len(currency_mapping) + 1)
                             currency_mapping[symbol] = pair_id
                             pair_details[pair_id] = {
                                 'base_currency': symbol,
-                                'quote_currency': 'USD',  # فرض بر این که قیمت بر حسب USD است
-                                'name_en': symbol,
-                                'last_price': price,
-                                'volume': volume_24h,
-                                'change_percent': change_24h
+                                'quote_currency': 'USDT',  # فرض بر USDT به عنوان quote پیش‌فرض
+                                'name_fa': name_fa,
+                                'name_en': name_en,
+                                'last_price': None,  # قیمت بعداً به‌روزرسانی می‌شود
+                                'volume': crypto.get('volume', None),
+                                'change_percent': crypto.get('change_24h', None)
                             }
-                            logger.info(f"Found currency: {symbol} -> {price}")
+                            logger.info(f"Found market: {symbol} -> {pair_id}")
                     except Exception as e:
-                        logger.warning(f"Error processing currency data: {e}")
+                        logger.warning(f"Error processing crypto data: {e}")
                         continue
                 
                 if currency_mapping:
@@ -92,11 +93,13 @@ def get_currency_pairs():
                         'details': pair_details
                     }
                     cache_timestamp = current_time
-                    logger.info(f"Successfully loaded {len(currency_mapping)} currencies")
+                    logger.info(f"Successfully loaded {len(currency_mapping)} currency pairs")
                     return currency_cache
                 else:
-                    logger.error("No valid currencies found in API response")
+                    logger.error("No valid currency pairs found in API response")
             
+            logger.error(f"Unexpected response structure: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+        
         logger.error(f"API Error: {response.status_code}")
         if response.status_code != 200:
             logger.error(f"Response text: {response.text[:500]}")
@@ -116,14 +119,13 @@ def get_currency_pair_id(currency_symbol):
     return pairs_data['mapping'].get(currency_symbol)
 
 def get_price(currency_symbol):
-    """دریافت قیمت از freecryptoapi.com"""
+    """دریافت قیمت از FreeCryptoAPI"""
     try:
         currency_upper = currency_symbol.upper()
         
-        # ابتدا از کش استفاده می‌کنیم
+        # ابتدا از کش استفاده می‌کنیم (اگر قیمت به‌روزرسانی شده باشد)
         pairs_data = get_currency_pairs()
         if pairs_data:
-            # جستجو در جزئیات ارزها برای قیمت
             for pair_id, details in pairs_data['details'].items():
                 if details.get('base_currency') == currency_upper:
                     price = details.get('last_price')
@@ -131,20 +133,32 @@ def get_price(currency_symbol):
                         logger.info(f"Found price for {currency_symbol} in cache: {price}")
                         return float(price)
         
-        # اگر در کش نبود، مستقیماً از API می‌گیریم
-        url = f"{BASE_URL}/v1?api_key={API_KEY}"
-        response = requests.get(url, timeout=10)
+        # اگر در کش نبود، مستقیماً از API می‌گیریم با /getData
+        params = {
+            'api_key': API_KEY,
+            'symbol': currency_upper
+        }
+        response = requests.get(f"{BASE_URL}/getData", params=params, timeout=10)
         if response.status_code == 200:
-            currencies = response.json()
+            data = response.json()
             
-            if isinstance(currencies, list):
-                for currency_data in currencies:
-                    symbol = currency_data.get('symbol', '').upper()
-                    if symbol == currency_upper:
-                        price = currency_data.get('price')
-                        if price:
-                            logger.info(f"Found price for {currency_symbol}: {price}")
-                            return float(price)
+            if isinstance(data, dict) and 'data' in data:
+                crypto_data = data['data']
+                if isinstance(crypto_data, list) and len(crypto_data) > 0:
+                    price = crypto_data[0].get('price')  # فرض بر فیلد 'price'
+                    if price:
+                        # به‌روزرسانی کش
+                        if pairs_data:
+                            pair_id = get_currency_pair_id(currency_upper)
+                            if pair_id:
+                                pairs_data['details'][pair_id]['last_price'] = float(price)
+                        logger.info(f"Found price for {currency_symbol}: {price}")
+                        return float(price)
+                elif isinstance(crypto_data, dict):
+                    price = crypto_data.get('price')
+                    if price:
+                        logger.info(f"Found price for {currency_symbol}: {price}")
+                        return float(price)
         
         logger.warning(f"No price found for {currency_symbol}")
         return None
@@ -166,9 +180,9 @@ def get_all_currencies():
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
     welcome_text = """
-🤖 **ربات اطلاع‌رسانی تغییرات قیمت ارزهای دیجیتال**
+🤖 **ربات اطلاع‌رسانی تغییرات قیمت FreeCryptoAPI**
 
-با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف هشدار دریافت کنید.
+با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف از API FreeCryptoAPI هشدار دریافت کنید.
 
 📋 **دستورات موجود:**
 /set [ارز] [درصد] - تنظیم هشدار (مثال: `/set btc 5`)
@@ -182,7 +196,7 @@ async def start(update: Update, context: CallbackContext):
 `/set btc 5` - هشدار برای تغییر ۵٪ بیت‌کوین
 `/set eth 10` - هشدار برای تغییر ۱۰٪ اتریوم
 
-🔗 **داده‌ها از FreeCryptoAPI.com**
+🔗 **پشتیبانی از FreeCryptoAPI**
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
@@ -211,12 +225,13 @@ async def currency_info(update: Update, context: CallbackContext):
     
     info_text = f"💰 **اطلاعات ارز {currency}**\n\n"
     info_text += f"• شناسه: `{pair_id}`\n"
-    info_text += f"• نام: {pair_detail.get('name_en', 'N/A')}\n"
+    info_text += f"• نام فارسی: {pair_detail.get('name_fa', 'N/A')}\n"
+    info_text += f"• نام انگلیسی: {pair_detail.get('name_en', 'N/A')}\n"
     info_text += f"• ارز پایه: {pair_detail.get('base_currency', 'N/A')}\n"
     info_text += f"• ارز متقابل: {pair_detail.get('quote_currency', 'N/A')}\n"
     
     if price:
-        info_text += f"• قیمت فعلی: ${price:,.2f}\n"
+        info_text += f"• قیمت فعلی: ${price:,.2f} USD\n"  # فرض بر USD
         
         # اطلاعات اضافی اگر موجود باشد
         change_percent = pair_detail.get('change_percent')
@@ -225,7 +240,7 @@ async def currency_info(update: Update, context: CallbackContext):
         if change_percent is not None:
             info_text += f"• تغییر 24h: {change_percent}%\n"
         if volume is not None:
-            info_text += f"• حجم معاملات 24h: ${volume:,.0f}\n"
+            info_text += f"• حجم معاملات: {volume:,.0f}\n"
     else:
         info_text += "• قیمت فعلی: در دسترس نیست\n"
     
@@ -245,30 +260,30 @@ async def test_price(update: Update, context: CallbackContext):
     
     # تست API
     try:
-        url = f"{BASE_URL}/v1?api_key={API_KEY}"
-        response = requests.get(url, timeout=10)
+        params = {'api_key': API_KEY}
+        response = requests.get(f"{BASE_URL}/getCryptoList", params=params, timeout=10)
         logger.info(f"Direct API test - Status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
             logger.info(f"API Response type: {type(data)}")
-            if isinstance(data, list):
-                logger.info(f"Number of currencies: {len(data)}")
-                if len(data) > 0:
-                    sample_currency = data[0]
-                    logger.info(f"Sample currency keys: {list(sample_currency.keys())}")
+            if isinstance(data, dict) and 'data' in data:
+                logger.info(f"Number of cryptos: {len(data['data'])}")
+                if len(data['data']) > 0:
+                    sample_crypto = data['data'][0]
+                    logger.info(f"Sample crypto keys: {list(sample_crypto.keys())}")
     except Exception as e:
         logger.error(f"Direct API test failed: {e}")
     
     price = get_price(currency)
     
     if price is not None:
-        await update.message.reply_text(f"✅ قیمت {currency}: ${price:,.2f}")
+        await update.message.reply_text(f"✅ قیمت {currency}: ${price:,.2f} USD")
     else:
         currencies = get_all_currencies()
         await update.message.reply_text(
             f"❌ ارز {currency} یافت نشد یا خطا در دریافت قیمت.\n\n"
-            f"✅ ارزهای موجود: {', '.join(currencies)}\n"
+            f"✅ ارزهای موجود: {', '.join(currencies[:20])} {'...' if len(currencies) > 20 else ''}\n"  # محدود به 20 برای جلوگیری از طولانی شدن
             f"لطفاً از حروف لاتین استفاده کنید (مثال: BTC به جای بیت‌کوین)"
         )
 
@@ -297,7 +312,7 @@ async def set_alert(update: Update, context: CallbackContext):
         currencies = get_all_currencies()
         await update.message.reply_text(
             f"❌ ارز {currency} یافت نشد یا خطا در دریافت قیمت.\n\n"
-            f"✅ ارزهای موجود: {', '.join(currencies)}\n"
+            f"✅ ارزهای موجود: {', '.join(currencies[:20])} {'...' if len(currencies) > 20 else ''}\n"
             f"لطفاً از حروف لاتین استفاده کنید."
         )
         return
@@ -319,7 +334,7 @@ async def set_alert(update: Update, context: CallbackContext):
             f"✅ هشدار تنظیم شد!\n"
             f"• ارز: {currency}\n"
             f"• درصد تغییر: {threshold}%\n"
-            f"• قیمت فعلی: ${current_price:,.2f}\n\n"
+            f"• قیمت فعلی: ${current_price:,.2f} USD\n\n"
             f"از این لحظه، هرگاه قیمت {threshold}% تغییر کند به شما اطلاع می‌دهم."
         )
     except Exception as e:
@@ -383,18 +398,22 @@ async def list_currencies(update: Update, context: CallbackContext):
         
         if currencies:
             text = f"💰 **ارزهای قابل دسترسی ({len(currencies)} ارز):**\n\n"
-            text += ", ".join(currencies)
+            # محدود به 50 ارز برای جلوگیری از طولانی شدن پیام
+            display_currencies = currencies[:50]
+            text += ", ".join(display_currencies)
+            if len(currencies) > 50:
+                text += f"\n... و {len(currencies) - 50} ارز دیگر"
             
             text += f"\n\n💡 برای اطلاعات کامل یک ارز از /info [ارز] استفاده کنید."
             text += f"\n📝 مثال: `/info btc`"
             
             await update.message.reply_text(text, parse_mode='Markdown')
         else:
-            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور")
+            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور FreeCryptoAPI")
             
     except Exception as e:
         logger.error(f"Error in list_currencies: {e}")
-        await update.message.reply_text("❌ خطا در ارتباط با سرور")
+        await update.message.reply_text("❌ خطا در ارتباط با سرور FreeCryptoAPI")
 
 async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
@@ -420,11 +439,11 @@ async def check_alerts(context: CallbackContext):
                         emoji = "📈" if change_percent > 0 else "📉"
                         
                         message = (
-                            f"{emoji} **هشدار قیمت ارز دیجیتال!**\n\n"
+                            f"{emoji} **هشدار قیمت FreeCryptoAPI!**\n\n"
                             f"• ارز: {currency}\n"
                             f"• تغییر: {change_percent:+.1f}%\n"
-                            f"• قیمت قبلی: ${last_price:,.2f}\n"
-                            f"• قیمت فعلی: ${current_price:,.2f}\n"
+                            f"• قیمت قبلی: ${last_price:,.2f} USD\n"
+                            f"• قیمت فعلی: ${current_price:,.2f} USD\n"
                             f"• آستانه: {threshold}%\n"
                             f"• زمان: {datetime.now().strftime('%H:%M:%S')}"
                         )
