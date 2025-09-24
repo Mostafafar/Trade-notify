@@ -3,12 +3,12 @@
 
 import asyncio
 import logging
+import json
+import aiohttp
 from telegram import Update
 from telegram.ext import Application, CommandHandler, CallbackContext
 import sqlite3
 from datetime import datetime
-import json
-from centrifuge import Centrifuge
 
 # تنظیمات
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
@@ -33,121 +33,135 @@ def init_db():
     conn.commit()
     conn.close()
 
-# کلاس مدیریت WebSocket
+# کلاس مدیریت WebSocket با aiohttp
 class RamzinexWebSocket:
     def __init__(self):
-        self.client = None
+        self.session = None
+        self.ws = None
         self.connected = False
-        self.subscriptions = {}
         self.price_data = {}
         self.market_mapping = {}
+        self.reconnect_delay = 5
         
     async def connect(self):
         """اتصال به WebSocket رمزینکس"""
-        try:
-            self.client = Centrifuge(WEBSOCKET_URL, {})
-            
-            # تعریف event handlers
-            self.client.on("connected", self.on_connected)
-            self.client.on("disconnected", self.on_disconnected)
-            self.client.on("error", self.on_error)
-            
-            # شروع اتصال
-            self.client.connect()
-            logger.info("Connecting to Ramzinex WebSocket...")
-            
-        except Exception as e:
-            logger.error(f"Error connecting to WebSocket: {e}")
-    
-    def on_connected(self, ctx):
-        """Handler برای زمانی که اتصال برقرار شد"""
-        self.connected = True
-        logger.info("Connected to Ramzinex WebSocket")
-        
-        # دریافت لیست مارکت‌ها و subscribe کردن
-        asyncio.create_task(self.subscribe_to_markets())
-    
-    def on_disconnected(self, ctx):
-        """Handler برای قطع اتصال"""
-        self.connected = False
-        logger.warning("Disconnected from Ramzinex WebSocket")
-    
-    def on_error(self, ctx):
-        """Handler برای خطاها"""
-        logger.error(f"WebSocket error: {ctx}")
-    
-    async def subscribe_to_markets(self):
-        """Subscribe به کانال‌های قیمتی"""
-        try:
-            # ابتدا مارکت‌ها را از API معمولی دریافت می‌کنیم
-            import requests
-            response = requests.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=10)
-            
-            if response.status_code == 200:
-                markets = response.json()
-                market_list = markets if isinstance(markets, list) else markets.get('data', [])
+        while True:
+            try:
+                self.session = aiohttp.ClientSession()
+                self.ws = await self.session.ws_connect(WEBSOCKET_URL)
+                self.connected = True
+                logger.info("Connected to Ramzinex WebSocket")
                 
-                for market in market_list:
-                    market_id = market.get('id')
-                    base_currency = market.get('base_asset', {}).get('symbol', '').upper()
-                    
-                    if market_id and base_currency:
-                        self.market_mapping[base_currency] = market_id
-                        self.market_mapping[str(market_id)] = base_currency
-                        
-                        # Subscribe به کانال last-trades برای دریافت قیمت‌های لحظه‌ای
-                        channel_name = f"last-trades:{market_id}"
-                        await self.subscribe_to_channel(channel_name, base_currency)
-                        
-                logger.info(f"Subscribed to {len(self.market_mapping)//2} markets")
+                # ارسال پیام connect
+                connect_msg = {
+                    'connect': {'name': 'python-client'},
+                    'id': 1
+                }
+                await self.ws.send_json(connect_msg)
                 
-        except Exception as e:
-            logger.error(f"Error subscribing to markets: {e}")
+                # دریافت لیست مارکت‌ها و subscribe کردن
+                await self.initialize_markets()
+                
+                # گوش دادن به پیام‌ها
+                await self.listen()
+                
+            except Exception as e:
+                logger.error(f"WebSocket connection error: {e}")
+                self.connected = False
+                await asyncio.sleep(self.reconnect_delay)
     
-    async def subscribe_to_channel(self, channel_name, currency):
-        """Subscribe به یک کانال خاص"""
+    async def initialize_markets(self):
+        """دریافت لیست مارکت‌ها و subscribe کردن"""
         try:
-            sub = self.client.new_subscription(channel_name, {"delta": "fossil"})
-            
-            @sub.on("publication")
-            def on_message(ctx):
-                self.handle_price_update(currency, ctx.data)
-            
-            @sub.on("subscribed")
-            def on_subscribed(ctx):
-                logger.debug(f"Subscribed to {channel_name}")
-            
-            @sub.on("error")
-            def on_error(ctx):
-                logger.error(f"Subscription error for {channel_name}: {ctx}")
-            
-            sub.subscribe()
-            self.subscriptions[channel_name] = sub
-            
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=10) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        markets = data if isinstance(data, list) else data.get('data', [])
+                        
+                        for market in markets:
+                            market_id = market.get('id')
+                            base_currency = market.get('base_asset', {}).get('symbol', '').upper()
+                            
+                            if market_id and base_currency:
+                                self.market_mapping[base_currency] = market_id
+                                self.market_mapping[str(market_id)] = base_currency
+                                
+                                # Subscribe به کانال last-trades
+                                subscribe_msg = {
+                                    'subscribe': {
+                                        'channel': f'last-trades:{market_id}',
+                                        'recover': True,
+                                        'delta': 'fossil'
+                                    },
+                                    'id': market_id + 1000
+                                }
+                                await self.ws.send_json(subscribe_msg)
+                                logger.debug(f"Subscribed to {base_currency} (ID: {market_id})")
+                        
+                        logger.info(f"Initialized {len(self.market_mapping)//2} markets")
+                        
         except Exception as e:
-            logger.error(f"Error subscribing to {channel_name}: {e}")
+            logger.error(f"Error initializing markets: {e}")
     
-    def handle_price_update(self, currency, data):
-        """پردازش به روزرسانی قیمت"""
-        try:
-            if isinstance(data, dict) and 'trades' in data:
-                trades = data['trades']
-                if trades and len(trades) > 0:
-                    latest_trade = trades[-1]  # آخرین معامله
-                    price = float(latest_trade.get('price', 0))
+    async def listen(self):
+        """گوش دادن به پیام‌های WebSocket"""
+        async for msg in self.ws:
+            try:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    await self.handle_message(data)
+                elif msg.type == aiohttp.WSMsgType.ERROR:
+                    logger.error("WebSocket error")
+                    break
+                elif msg.type == aiohttp.WSMsgType.CLOSED:
+                    logger.info("WebSocket connection closed")
+                    break
                     
-                    if price > 0:
-                        self.price_data[currency] = {
-                            'price': price,
-                            'timestamp': datetime.now().timestamp(),
-                            'volume': latest_trade.get('volume', 0),
-                            'type': latest_trade.get('type', 'unknown')
-                        }
-                        
-                        logger.debug(f"Price update for {currency}: {price}")
-                        
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message: {e}")
+    
+    async def handle_message(self, data):
+        """پردازش پیام‌های دریافتی"""
+        try:
+            # پاسخ به ping
+            if data == {}:
+                await self.ws.send_json({})  # Pong
+                return
+            
+            # پردازش پیام‌های publication
+            if 'publish' in data:
+                channel = data.get('publish', {}).get('channel', '')
+                publication_data = data.get('publish', {}).get('data', {})
+                
+                if channel.startswith('last-trades:'):
+                    market_id = channel.split(':')[1]
+                    currency = self.market_mapping.get(market_id)
+                    if currency:
+                        self.handle_trade_data(currency, publication_data)
+            
         except Exception as e:
-            logger.error(f"Error handling price update for {currency}: {e}")
+            logger.error(f"Error handling message: {e}")
+    
+    def handle_trade_data(self, currency, data):
+        """پردازش داده‌های معاملات"""
+        try:
+            if 'trades' in data and data['trades']:
+                latest_trade = data['trades'][-1]  # آخرین معامله
+                price = float(latest_trade.get('price', 0))
+                
+                if price > 0:
+                    self.price_data[currency] = {
+                        'price': price,
+                        'timestamp': datetime.now().timestamp(),
+                        'volume': latest_trade.get('volume', 0),
+                        'type': latest_trade.get('type', 'unknown')
+                    }
+                    
+                    logger.debug(f"Price update for {currency}: {price}")
+                    
+        except Exception as e:
+            logger.error(f"Error handling trade data for {currency}: {e}")
     
     def get_price(self, currency_symbol):
         """دریافت قیمت از داده‌های WebSocket"""
@@ -155,35 +169,33 @@ class RamzinexWebSocket:
         
         if currency in self.price_data:
             price_info = self.price_data[currency]
-            # بررسی که داده بیشتر از 30 ثانیه قدیمی نباشد
-            if datetime.now().timestamp() - price_info['timestamp'] < 30:
+            # بررسی که داده بیشتر از 60 ثانیه قدیمی نباشد
+            if datetime.now().timestamp() - price_info['timestamp'] < 60:
                 return price_info['price']
         
         # اگر داده WebSocket قدیمی یا موجود نبود، از API معمولی استفاده می‌کنیم
-        return self.get_price_from_api(currency)
+        return asyncio.run(self.get_price_from_api(currency))
     
-    def get_price_from_api(self, currency_symbol):
+    async def get_price_from_api(self, currency_symbol):
         """دریافت قیمت از API معمولی (fallback)"""
         try:
-            import requests
-            currency = currency_symbol.upper()
-            
-            response = requests.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=5)
-            if response.status_code == 200:
-                markets = response.json()
-                market_list = markets if isinstance(markets, list) else markets.get('data', [])
-                
-                for market in market_list:
-                    base_currency = market.get('base_asset', {}).get('symbol', '').upper()
-                    if base_currency == currency:
-                        price = market.get('last_price')
-                        if price:
-                            return float(price)
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://publicapi.ramzinex.com/exchange/api/v1.0/exchange/market", timeout=5) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        markets = data if isinstance(data, list) else data.get('data', [])
+                        
+                        for market in markets:
+                            base_currency = market.get('base_asset', {}).get('symbol', '').upper()
+                            if base_currency == currency_symbol:
+                                price = market.get('last_price')
+                                if price:
+                                    return float(price)
             
             return None
             
         except Exception as e:
-            logger.error(f"Error getting price from API for {currency}: {e}")
+            logger.error(f"Error getting price from API for {currency_symbol}: {e}")
             return None
     
     def get_all_currencies(self):
@@ -197,7 +209,7 @@ class RamzinexWebSocket:
 # ایجاد نمونه WebSocket جهانی
 websocket_manager = RamzinexWebSocket()
 
-# دستورات بات تلگرام (مانند قبل با تغییرات جزئی)
+# دستورات بات تلگرام
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
     welcome_text = """
@@ -233,7 +245,8 @@ async def test_price(update: Update, context: CallbackContext):
     price = websocket_manager.get_price(currency)
     
     if price is not None:
-        source = "WebSocket" if currency in websocket_manager.price_data else "API"
+        source = "WebSocket" if (currency in websocket_manager.price_data and 
+                               datetime.now().timestamp() - websocket_manager.price_data[currency]['timestamp'] < 60) else "API"
         await update.message.reply_text(f"✅ قیمت {currency}: {price:,.0f} تومان (منبع: {source})")
     else:
         currencies = websocket_manager.get_all_currencies()
@@ -297,6 +310,54 @@ async def set_alert(update: Update, context: CallbackContext):
     finally:
         conn.close()
 
+async def list_alerts(update: Update, context: CallbackContext):
+    """نمایش هشدارهای فعال"""
+    user_id = update.effective_user.id
+    
+    conn = sqlite3.connect('notifications.db')
+    c = conn.cursor()
+    c.execute('SELECT currency, threshold, last_price FROM alerts WHERE user_id = ?', (user_id,))
+    alerts = c.fetchall()
+    conn.close()
+    
+    if not alerts:
+        await update.message.reply_text("📭 هیچ هشدار فعالی ندارید.")
+        return
+    
+    text = "🔔 **هشدارهای فعال شما:**\n\n"
+    for currency, threshold, last_price in alerts:
+        current_price = websocket_manager.get_price(currency)
+        if current_price and last_price:
+            change = ((current_price - last_price) / last_price) * 100
+            text += f"• {currency}: {threshold}% (تغییر فعلی: {change:+.1f}%)\n"
+        else:
+            text += f"• {currency}: {threshold}% (خطا در دریافت قیمت)\n"
+    
+    await update.message.reply_text(text, parse_mode='Markdown')
+
+async def remove_alert(update: Update, context: CallbackContext):
+    """حذف هشدار"""
+    user_id = update.effective_user.id
+    args = context.args
+    
+    if len(args) != 1:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/remove btc`", parse_mode='Markdown')
+        return
+    
+    currency = args[0].upper()
+    
+    conn = sqlite3.connect('notifications.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM alerts WHERE user_id = ? AND currency = ?', (user_id, currency))
+    conn.commit()
+    
+    if c.rowcount > 0:
+        await update.message.reply_text(f"✅ هشدار برای ارز {currency} حذف شد.")
+    else:
+        await update.message.reply_text(f"❌ هشداری برای ارز {currency} پیدا نشد.")
+    
+    conn.close()
+
 async def list_currencies(update: Update, context: CallbackContext):
     """لیست ارزهای قابل دسترسی"""
     try:
@@ -305,16 +366,45 @@ async def list_currencies(update: Update, context: CallbackContext):
         if currencies:
             text = f"💰 **ارزهای قابل دسترسی ({len(currencies)} ارز):**\n\n"
             text += ", ".join(currencies)
+            
+            text += f"\n\n💡 برای اطلاعات کامل یک ارز از /info [ارز] استفاده کنید."
+            text += f"\n📝 مثال: `/info btc`"
+            
             await update.message.reply_text(text, parse_mode='Markdown')
         else:
-            await update.message.reply_text("❌ خطا در دریافت لیست ارزها")
+            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور رمزینکس")
             
     except Exception as e:
         logger.error(f"Error in list_currencies: {e}")
-        await update.message.reply_text("❌ خطا در ارتباط با سرور")
+        await update.message.reply_text("❌ خطا در ارتباط با سرور رمزینکس")
 
-# سایر توابع (list_alerts, remove_alert, currency_info, check_alerts) 
-# مانند قبل باقی می‌مانند با این تفاوت که از websocket_manager.get_price() استفاده می‌کنند
+async def currency_info(update: Update, context: CallbackContext):
+    """نمایش اطلاعات کامل یک ارز"""
+    args = context.args
+    
+    if len(args) != 1:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/info btc`", parse_mode='Markdown')
+        return
+    
+    currency = args[0].upper()
+    
+    price = websocket_manager.get_price(currency)
+    pair_id = websocket_manager.market_mapping.get(currency)
+    
+    if not pair_id:
+        await update.message.reply_text(f"❌ ارز {currency} یافت نشد.")
+        return
+    
+    info_text = f"💰 **اطلاعات ارز {currency}**\n\n"
+    info_text += f"• شناسه بازار: `{pair_id}`\n"
+    info_text += f"• ارز: {currency}\n"
+    
+    if price:
+        info_text += f"• قیمت فعلی: {price:,.0f} تومان\n"
+    else:
+        info_text += "• قیمت فعلی: در دسترس نیست\n"
+    
+    await update.message.reply_text(info_text, parse_mode='Markdown')
 
 async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
@@ -363,13 +453,21 @@ async def check_alerts(context: CallbackContext):
     except Exception as e:
         logger.error(f"Error in check_alerts: {e}")
 
+async def start_websocket():
+    """شروع اتصال WebSocket"""
+    await websocket_manager.connect()
+
 def main():
     """تابع اصلی"""
     init_db()
     
     try:
-        # راه‌اندازی WebSocket در یک task جداگانه
-        asyncio.create_task(websocket_manager.connect())
+        # ایجاد event loop برای WebSocket
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # راه‌اندازی WebSocket در پس‌زمینه
+        loop.create_task(start_websocket())
         
         application = Application.builder().token(TELEGRAM_TOKEN).build()
         
