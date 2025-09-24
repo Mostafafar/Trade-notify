@@ -2,24 +2,17 @@ import requests
 
 API_KEY = "pdb9zpy2vxpdijlyx5x5"
 
-# تست آدرس‌های مختلف
-urls_to_test = [
-    f"https://freecryptoapi.com/api/v1?api_key={API_KEY}",
-    f"https://api.freecryptoapi.com/v1?api_key={API_KEY}",
-    f"https://freecryptoapi.com/api/v1/getData.php?api_key={API_KEY}",
-    f"https://api.freecryptoapi.com/v1/getData.php?api_key={API_KEY}",
-]
+# تست با symbol
+url = f"https://api.freecryptoapi.com/v1/getData.php?api_key={API_KEY}&symbol=BTC"
 
-for url in urls_to_test:
-    try:
-        response = requests.get(url, timeout=10)
-        print(f"URL: {url}")
-        print(f"Status: {response.status_code}")
-        if response.status_code == 200:
-            print(f"Success! Response: {response.text[:200]}")
-        else:
-            print(f"Error: {response.text[:200]}")
-        print("-" * 50)
-    except Exception as e:
-        print(f"Error with {url}: {e}")
-        print("-" * 50)
+response = requests.get(url, timeout=10)
+print(f"URL: {url}")
+print(f"Status: {response.status_code}")
+print(f"Response: {response.text}")
+
+# تست بدون symbol برای گرفتن لیست همه ارزها
+url_all = f"https://api.freecryptoapi.com/v1/getData.php?api_key={API_KEY}"
+response_all = requests.get(url_all, timeout=10)
+print(f"\nURL (all): {url_all}")
+print(f"Status: {response_all.status_code}")
+print(f"Response: {response_all.text[:500]}")
