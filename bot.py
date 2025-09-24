@@ -10,8 +10,9 @@ import sqlite3
 from datetime import datetime
 import json
 
-# تنظیمات
-COINGECKO_API_URL = "https://api.coingecko.com/api/v3"
+# تنظیمات جدید
+BASE_URL = "https://freecryptoapi.com/api"
+API_KEY = "pdb9zpy2vxpdijlyx5x5"
 TELEGRAM_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
 # تنظیمات لاگ
@@ -21,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# کش برای ذخیره اطلاعات ارزها
+# کش برای ذخیره اطلاعات جفت‌ارزها
 currency_cache = {}
 cache_timestamp = 0
 CACHE_TIMEOUT = 300  # 5 دقیقه
@@ -32,14 +33,14 @@ def init_db():
     c = conn.cursor()
     
     c.execute('''CREATE TABLE IF NOT EXISTS alerts
-                 (user_id INTEGER, currency_id TEXT, currency_symbol TEXT, 
-                  threshold REAL, last_price REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  PRIMARY KEY (user_id, currency_id))''')
+                 (user_id INTEGER, currency TEXT, pair_id INTEGER, threshold REAL, 
+                  last_price REAL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (user_id, currency))''')
     conn.commit()
     conn.close()
 
-def get_coingecko_coin_list():
-    """دریافت لیست ارزها از CoinGecko"""
+def get_currency_pairs():
+    """دریافت لیست جفت‌ارزها از freecryptoapi.com"""
     global currency_cache, cache_timestamp
     
     # بررسی کش
@@ -48,132 +49,140 @@ def get_coingecko_coin_list():
         return currency_cache
     
     try:
-        response = requests.get(f"{COINGECKO_API_URL}/coins/list", timeout=10)
-        logger.info(f"CoinGecko API Status: {response.status_code}")
-        
-        if response.status_code == 200:
-            coins = response.json()
-            
-            # ایجاد مپینگ برای جستجوی آسان
-            coin_mapping = {}
-            for coin in coins:
-                coin_id = coin['id']
-                symbol = coin['symbol'].upper()
-                name = coin['name']
-                
-                coin_mapping[coin_id] = {
-                    'symbol': symbol,
-                    'name': name
-                }
-                
-                # همچنین برای جستجو با سیمبل
-                coin_mapping[symbol] = {
-                    'id': coin_id,
-                    'name': name
-                }
-            
-            currency_cache = coin_mapping
-            cache_timestamp = current_time
-            logger.info(f"Successfully loaded {len(coins)} coins from CoinGecko")
-            return currency_cache
-            
-        logger.error(f"CoinGecko API Error: {response.status_code}")
-        return None
-            
-    except Exception as e:
-        logger.error(f"Error getting coin list from CoinGecko: {e}")
-        return None
-
-def find_coin_id(symbol_or_name):
-    """یافتن coin_id بر اساس سیمبل یا نام ارز"""
-    coins_data = get_coingecko_coin_list()
-    if not coins_data:
-        return None
-    
-    symbol_or_name = symbol_or_name.lower()
-    
-    # جستجو در داده‌ها
-    for coin_id, info in coins_data.items():
-        if isinstance(info, dict):
-            if info.get('symbol', '').lower() == symbol_or_name:
-                return coin_id
-            if info.get('name', '').lower() == symbol_or_name:
-                return coin_id
-    
-    # اگر مستقیماً coin_id باشد
-    if symbol_or_name in coins_data:
-        return symbol_or_name
-    
-    return None
-
-def get_price(coin_id):
-    """دریافت قیمت از CoinGecko"""
-    try:
-        response = requests.get(
-            f"{COINGECKO_API_URL}/simple/price", 
-            params={
-                'ids': coin_id,
-                'vs_currencies': 'usd',
-                'include_24hr_change': 'true'
-            },
-            timeout=10
-        )
+        # استفاده از اندپوینت جدید
+        url = f"{BASE_URL}/v1?api_key={API_KEY}"
+        response = requests.get(url, timeout=10)
+        logger.info(f"API Status: {response.status_code}")
         
         if response.status_code == 200:
             data = response.json()
-            if coin_id in data:
-                price_data = data[coin_id]
-                return {
-                    'usd': price_data.get('usd'),
-                    'usd_24h_change': price_data.get('usd_24h_change')
-                }
-        
-        logger.warning(f"No price found for {coin_id}")
+            logger.info(f"API Response type: {type(data)}")
+            
+            if isinstance(data, list):
+                currency_mapping = {}
+                pair_details = {}
+                
+                for currency_data in data:
+                    try:
+                        symbol = currency_data.get('symbol', '').upper()
+                        price = currency_data.get('price', 0)
+                        change_24h = currency_data.get('change_24h', 0)
+                        volume_24h = currency_data.get('volume_24h', 0)
+                        
+                        if symbol:
+                            # ایجاد یک ID ساده برای ارز
+                            pair_id = hash(symbol) % 1000000
+                            currency_mapping[symbol] = pair_id
+                            pair_details[pair_id] = {
+                                'base_currency': symbol,
+                                'quote_currency': 'USD',  # فرض بر این که قیمت بر حسب USD است
+                                'name_en': symbol,
+                                'last_price': price,
+                                'volume': volume_24h,
+                                'change_percent': change_24h
+                            }
+                            logger.info(f"Found currency: {symbol} -> {price}")
+                    except Exception as e:
+                        logger.warning(f"Error processing currency data: {e}")
+                        continue
+                
+                if currency_mapping:
+                    currency_cache = {
+                        'mapping': currency_mapping,
+                        'details': pair_details
+                    }
+                    cache_timestamp = current_time
+                    logger.info(f"Successfully loaded {len(currency_mapping)} currencies")
+                    return currency_cache
+                else:
+                    logger.error("No valid currencies found in API response")
+            
+        logger.error(f"API Error: {response.status_code}")
+        if response.status_code != 200:
+            logger.error(f"Response text: {response.text[:500]}")
         return None
             
     except Exception as e:
-        logger.error(f"Error getting price for {coin_id}: {e}")
+        logger.error(f"Error getting currency pairs: {e}")
         return None
 
-def get_all_popular_coins():
-    """لیست ارزهای معروف"""
-    popular_coins = [
-        'bitcoin', 'ethereum', 'tether', 'binancecoin', 'ripple',
-        'cardano', 'solana', 'dogecoin', 'polkadot', 'litecoin'
-    ]
+def get_currency_pair_id(currency_symbol):
+    """یافتن pair_id مربوط به یک ارز خاص"""
+    pairs_data = get_currency_pairs()
+    if not pairs_data:
+        return None
     
-    coins_data = get_coingecko_coin_list()
-    if not coins_data:
-        return ['BTC', 'ETH', 'USDT', 'BNB', 'XRP', 'ADA', 'SOL', 'DOGE', 'DOT', 'LTC']
+    currency_symbol = currency_symbol.upper()
+    return pairs_data['mapping'].get(currency_symbol)
+
+def get_price(currency_symbol):
+    """دریافت قیمت از freecryptoapi.com"""
+    try:
+        currency_upper = currency_symbol.upper()
+        
+        # ابتدا از کش استفاده می‌کنیم
+        pairs_data = get_currency_pairs()
+        if pairs_data:
+            # جستجو در جزئیات ارزها برای قیمت
+            for pair_id, details in pairs_data['details'].items():
+                if details.get('base_currency') == currency_upper:
+                    price = details.get('last_price')
+                    if price:
+                        logger.info(f"Found price for {currency_symbol} in cache: {price}")
+                        return float(price)
+        
+        # اگر در کش نبود، مستقیماً از API می‌گیریم
+        url = f"{BASE_URL}/v1?api_key={API_KEY}"
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            currencies = response.json()
+            
+            if isinstance(currencies, list):
+                for currency_data in currencies:
+                    symbol = currency_data.get('symbol', '').upper()
+                    if symbol == currency_upper:
+                        price = currency_data.get('price')
+                        if price:
+                            logger.info(f"Found price for {currency_symbol}: {price}")
+                            return float(price)
+        
+        logger.warning(f"No price found for {currency_symbol}")
+        return None
+            
+    except Exception as e:
+        logger.error(f"Error getting price for {currency_symbol}: {e}")
+        return None
+
+def get_all_currencies():
+    """دریافت لیست تمام ارزهای قابل معامله"""
+    pairs_data = get_currency_pairs()
+    if not pairs_data:
+        # لیست پیش‌فرض ارزهای معروف
+        default_currencies = ['BTC', 'ETH', 'USDT', 'ADA', 'DOT', 'LTC', 'BCH', 'XRP', 'EOS', 'TRX']
+        return default_currencies
     
-    result = []
-    for coin_id in popular_coins:
-        if coin_id in coins_data:
-            info = coins_data[coin_id]
-            result.append(f"{info['symbol'].upper()} ({info['name']})")
-    
-    return result
+    return sorted(pairs_data['mapping'].keys())
 
 async def start(update: Update, context: CallbackContext):
     """دستور شروع"""
     welcome_text = """
 🤖 **ربات اطلاع‌رسانی تغییرات قیمت ارزهای دیجیتال**
 
-با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف در CoinGecko هشدار دریافت کنید.
+با این ربات می‌توانید برای تغییرات قیمت ارزهای مختلف هشدار دریافت کنید.
 
 📋 **دستورات موجود:**
-/set [ارز] [درصد] - تنظیم هشدار (مثال: `/set bitcoin 5` یا `/set btc 5`)
+/set [ارز] [درصد] - تنظیم هشدار (مثال: `/set btc 5`)
 /list - نمایش هشدارهای فعال
-/remove [ارز] - حذف هشدار (مثال: `/remove bitcoin`)
-/currencies - لیست ارزهای معروف
-/test [ارز] - تست دریافت قیمت یک ارز (مثال: `/test bitcoin`)
-/info [ارز] - اطلاعات کامل یک ارز (مثال: `/info bitcoin`)
+/remove [ارز] - حذف هشدار (مثال: `/remove btc`)
+/currencies - لیست ارزهای قابل دسترسی
+/test [ارز] - تست دریافت قیمت یک ارز (مثال: `/test btc`)
+/info [ارز] - اطلاعات کامل یک ارز (مثال: `/info btc`)
 
 💡 **مثال:**
-`/set bitcoin 5` - هشدار برای تغییر ۵٪ بیت‌کوین
-`/set ethereum 10` - هشدار برای تغییر ۱۰٪ اتریوم
+`/set btc 5` - هشدار برای تغییر ۵٪ بیت‌کوین
+`/set eth 10` - هشدار برای تغییر ۱۰٪ اتریوم
 
-🔗 **داده‌ها از CoinGecko**
+🔗 **داده‌ها از FreeCryptoAPI.com**
 """
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
@@ -181,34 +190,42 @@ async def currency_info(update: Update, context: CallbackContext):
     """نمایش اطلاعات کامل یک ارز"""
     args = context.args
     
-    if len(args) < 1:
-        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/info bitcoin` یا `/info btc`", parse_mode='Markdown')
+    if len(args) != 1:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/info btc`", parse_mode='Markdown')
         return
     
-    currency_input = ' '.join(args).lower()
-    coin_id = find_coin_id(currency_input)
+    currency = args[0].upper()
+    pairs_data = get_currency_pairs()
     
-    if not coin_id:
-        await update.message.reply_text(f"❌ ارز '{currency_input}' یافت نشد.")
+    if not pairs_data:
+        await update.message.reply_text("❌ خطا در دریافت اطلاعات از سرور")
         return
     
-    coins_data = get_coingecko_coin_list()
-    coin_info = coins_data.get(coin_id, {})
-    price_data = get_price(coin_id)
+    pair_id = get_currency_pair_id(currency)
+    if not pair_id:
+        await update.message.reply_text(f"❌ ارز {currency} یافت نشد.")
+        return
     
-    info_text = f"💰 **اطلاعات ارز دیجیتال**\n\n"
-    info_text += f"• نام: {coin_info.get('name', 'N/A')}\n"
-    info_text += f"• نماد: {coin_info.get('symbol', 'N/A').upper()}\n"
-    info_text += f"• شناسه: `{coin_id}`\n"
+    pair_detail = pairs_data['details'].get(pair_id, {})
+    price = get_price(currency)
     
-    if price_data:
-        price = price_data.get('usd')
-        change_24h = price_data.get('usd_24h_change')
+    info_text = f"💰 **اطلاعات ارز {currency}**\n\n"
+    info_text += f"• شناسه: `{pair_id}`\n"
+    info_text += f"• نام: {pair_detail.get('name_en', 'N/A')}\n"
+    info_text += f"• ارز پایه: {pair_detail.get('base_currency', 'N/A')}\n"
+    info_text += f"• ارز متقابل: {pair_detail.get('quote_currency', 'N/A')}\n"
+    
+    if price:
+        info_text += f"• قیمت فعلی: ${price:,.2f}\n"
         
-        if price:
-            info_text += f"• قیمت فعلی: ${price:,.2f}\n"
-        if change_24h is not None:
-            info_text += f"• تغییر 24h: {change_24h:+.2f}%\n"
+        # اطلاعات اضافی اگر موجود باشد
+        change_percent = pair_detail.get('change_percent')
+        volume = pair_detail.get('volume')
+        
+        if change_percent is not None:
+            info_text += f"• تغییر 24h: {change_percent}%\n"
+        if volume is not None:
+            info_text += f"• حجم معاملات 24h: ${volume:,.0f}\n"
     else:
         info_text += "• قیمت فعلی: در دسترس نیست\n"
     
@@ -218,56 +235,55 @@ async def test_price(update: Update, context: CallbackContext):
     """تست دریافت قیمت یک ارز"""
     args = context.args
     
-    if len(args) < 1:
-        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/test bitcoin` یا `/test btc`", parse_mode='Markdown')
+    if len(args) != 1:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/test btc`", parse_mode='Markdown')
         return
     
-    currency_input = ' '.join(args).lower()
+    currency = args[0].upper()
     
-    await update.message.reply_text(f"🔍 در حال دریافت قیمت {currency_input}...")
+    await update.message.reply_text(f"🔍 در حال دریافت قیمت {currency}...")
     
-    coin_id = find_coin_id(currency_input)
-    
-    if not coin_id:
-        popular = get_all_popular_coins()
-        await update.message.reply_text(
-            f"❌ ارز '{currency_input}' یافت نشد.\n\n"
-            f"✅ ارزهای معروف:\n" + "\n".join(popular) + 
-            f"\n\n💡 می‌توانید از نام کامل (bitcoin) یا نماد (btc) استفاده کنید."
-        )
-        return
-    
-    price_data = get_price(coin_id)
-    
-    if price_data and price_data.get('usd'):
-        coins_data = get_coingecko_coin_list()
-        coin_info = coins_data.get(coin_id, {})
+    # تست API
+    try:
+        url = f"{BASE_URL}/v1?api_key={API_KEY}"
+        response = requests.get(url, timeout=10)
+        logger.info(f"Direct API test - Status: {response.status_code}")
         
-        price = price_data['usd']
-        change_24h = price_data.get('usd_24h_change', 0)
-        
-        message = f"✅ **{coin_info.get('name', 'Unknown')} ({coin_info.get('symbol', '').upper()})**\n\n"
-        message += f"• قیمت: ${price:,.2f}\n"
-        message += f"• تغییر 24h: {change_24h:+.2f}%"
-        
-        await update.message.reply_text(message, parse_mode='Markdown')
+        if response.status_code == 200:
+            data = response.json()
+            logger.info(f"API Response type: {type(data)}")
+            if isinstance(data, list):
+                logger.info(f"Number of currencies: {len(data)}")
+                if len(data) > 0:
+                    sample_currency = data[0]
+                    logger.info(f"Sample currency keys: {list(sample_currency.keys())}")
+    except Exception as e:
+        logger.error(f"Direct API test failed: {e}")
+    
+    price = get_price(currency)
+    
+    if price is not None:
+        await update.message.reply_text(f"✅ قیمت {currency}: ${price:,.2f}")
     else:
-        await update.message.reply_text("❌ خطا در دریافت قیمت")
+        currencies = get_all_currencies()
+        await update.message.reply_text(
+            f"❌ ارز {currency} یافت نشد یا خطا در دریافت قیمت.\n\n"
+            f"✅ ارزهای موجود: {', '.join(currencies)}\n"
+            f"لطفاً از حروف لاتین استفاده کنید (مثال: BTC به جای بیت‌کوین)"
+        )
 
 async def set_alert(update: Update, context: CallbackContext):
     """تنظیم هشدار جدید"""
     user_id = update.effective_user.id
     args = context.args
     
-    if len(args) < 2:
-        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/set bitcoin 5` یا `/set btc 5`", parse_mode='Markdown')
+    if len(args) != 2:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/set btc 5`", parse_mode='Markdown')
         return
     
-    currency_input = ' '.join(args[:-1]).lower()
-    threshold_str = args[-1]
-    
+    currency = args[0].upper()
     try:
-        threshold = float(threshold_str)
+        threshold = float(args[1])
         if threshold <= 0:
             await update.message.reply_text("❌ درصد باید بزرگتر از صفر باشد.")
             return
@@ -275,25 +291,18 @@ async def set_alert(update: Update, context: CallbackContext):
         await update.message.reply_text("❌ درصد باید یک عدد باشد.")
         return
     
-    # یافتن coin_id
-    coin_id = find_coin_id(currency_input)
-    if not coin_id:
-        popular = get_all_popular_coins()
+    # بررسی وجود ارز
+    current_price = get_price(currency)
+    if current_price is None:
+        currencies = get_all_currencies()
         await update.message.reply_text(
-            f"❌ ارز '{currency_input}' یافت نشد.\n\n"
-            f"✅ ارزهای معروف:\n" + "\n".join(popular[:5])
+            f"❌ ارز {currency} یافت نشد یا خطا در دریافت قیمت.\n\n"
+            f"✅ ارزهای موجود: {', '.join(currencies)}\n"
+            f"لطفاً از حروف لاتین استفاده کنید."
         )
         return
     
-    # دریافت قیمت فعلی
-    price_data = get_price(coin_id)
-    if not price_data or price_data.get('usd') is None:
-        await update.message.reply_text("❌ خطا در دریافت قیمت فعلی")
-        return
-    
-    current_price = price_data['usd']
-    coins_data = get_coingecko_coin_list()
-    coin_info = coins_data.get(coin_id, {})
+    pair_id = get_currency_pair_id(currency) or 1
     
     # ذخیره در دیتابیس
     conn = sqlite3.connect('notifications.db')
@@ -301,15 +310,14 @@ async def set_alert(update: Update, context: CallbackContext):
     
     try:
         c.execute('''INSERT OR REPLACE INTO alerts 
-                     (user_id, currency_id, currency_symbol, threshold, last_price) 
+                     (user_id, currency, pair_id, threshold, last_price) 
                      VALUES (?, ?, ?, ?, ?)''', 
-                 (user_id, coin_id, coin_info.get('symbol', '').upper(), threshold, current_price))
+                 (user_id, currency, pair_id, threshold, current_price))
         conn.commit()
         
         await update.message.reply_text(
             f"✅ هشدار تنظیم شد!\n"
-            f"• ارز: {coin_info.get('name', coin_id)}\n"
-            f"• نماد: {coin_info.get('symbol', '').upper()}\n"
+            f"• ارز: {currency}\n"
             f"• درصد تغییر: {threshold}%\n"
             f"• قیمت فعلی: ${current_price:,.2f}\n\n"
             f"از این لحظه، هرگاه قیمت {threshold}% تغییر کند به شما اطلاع می‌دهم."
@@ -326,7 +334,7 @@ async def list_alerts(update: Update, context: CallbackContext):
     
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
-    c.execute('SELECT currency_id, currency_symbol, threshold, last_price FROM alerts WHERE user_id = ?', (user_id,))
+    c.execute('SELECT currency, threshold, last_price FROM alerts WHERE user_id = ?', (user_id,))
     alerts = c.fetchall()
     conn.close()
     
@@ -335,15 +343,13 @@ async def list_alerts(update: Update, context: CallbackContext):
         return
     
     text = "🔔 **هشدارهای فعال شما:**\n\n"
-    for currency_id, currency_symbol, threshold, last_price in alerts:
-        current_price_data = get_price(currency_id)
-        
-        if current_price_data and current_price_data.get('usd') and last_price:
-            current_price = current_price_data['usd']
+    for currency, threshold, last_price in alerts:
+        current_price = get_price(currency)
+        if current_price and last_price:
             change = ((current_price - last_price) / last_price) * 100
-            text += f"• {currency_symbol}: {threshold}% (تغییر فعلی: {change:+.1f}%)\n"
+            text += f"• {currency}: {threshold}% (تغییر فعلی: {change:+.1f}%)\n"
         else:
-            text += f"• {currency_symbol}: {threshold}% (خطا در دریافت قیمت)\n"
+            text += f"• {currency}: {threshold}% (خطا در دریافت قیمت)\n"
     
     await update.message.reply_text(text, parse_mode='Markdown')
 
@@ -352,52 +358,50 @@ async def remove_alert(update: Update, context: CallbackContext):
     user_id = update.effective_user.id
     args = context.args
     
-    if len(args) < 1:
-        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/remove bitcoin` یا `/remove btc`", parse_mode='Markdown')
+    if len(args) != 1:
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: `/remove btc`", parse_mode='Markdown')
         return
     
-    currency_input = ' '.join(args).lower()
-    coin_id = find_coin_id(currency_input)
-    
-    if not coin_id:
-        await update.message.reply_text(f"❌ ارز '{currency_input}' یافت نشد.")
-        return
+    currency = args[0].upper()
     
     conn = sqlite3.connect('notifications.db')
     c = conn.cursor()
-    c.execute('DELETE FROM alerts WHERE user_id = ? AND currency_id = ?', (user_id, coin_id))
+    c.execute('DELETE FROM alerts WHERE user_id = ? AND currency = ?', (user_id, currency))
     conn.commit()
     
     if c.rowcount > 0:
-        await update.message.reply_text(f"✅ هشدار برای ارز '{currency_input}' حذف شد.")
+        await update.message.reply_text(f"✅ هشدار برای ارز {currency} حذف شد.")
     else:
-        await update.message.reply_text(f"❌ هشداری برای ارز '{currency_input}' پیدا نشد.")
+        await update.message.reply_text(f"❌ هشداری برای ارز {currency} پیدا نشد.")
     
     conn.close()
 
 async def list_currencies(update: Update, context: CallbackContext):
-    """لیست ارزهای معروف"""
+    """لیست ارزهای قابل دسترسی"""
     try:
-        popular_coins = get_all_popular_coins()
+        currencies = get_all_currencies()
         
-        text = "💰 **ارزهای دیجیتال معروف:**\n\n"
-        text += "\n".join(popular_coins)
-        
-        text += f"\n\n💡 برای اطلاعات کامل یک ارز از /info [ارز] استفاده کنید."
-        text += f"\n📝 مثال: `/info bitcoin` یا `/info btc`"
-        
-        await update.message.reply_text(text, parse_mode='Markdown')
+        if currencies:
+            text = f"💰 **ارزهای قابل دسترسی ({len(currencies)} ارز):**\n\n"
+            text += ", ".join(currencies)
+            
+            text += f"\n\n💡 برای اطلاعات کامل یک ارز از /info [ارز] استفاده کنید."
+            text += f"\n📝 مثال: `/info btc`"
+            
+            await update.message.reply_text(text, parse_mode='Markdown')
+        else:
+            await update.message.reply_text("❌ خطا در دریافت لیست ارزها از سرور")
             
     except Exception as e:
         logger.error(f"Error in list_currencies: {e}")
-        await update.message.reply_text("❌ خطا در ارتباط با سرور CoinGecko")
+        await update.message.reply_text("❌ خطا در ارتباط با سرور")
 
 async def check_alerts(context: CallbackContext):
     """بررسی هشدارها هر 30 ثانیه"""
     try:
         conn = sqlite3.connect('notifications.db')
         c = conn.cursor()
-        c.execute('SELECT user_id, currency_id, currency_symbol, threshold, last_price FROM alerts')
+        c.execute('SELECT user_id, currency, pair_id, threshold, last_price FROM alerts')
         alerts = c.fetchall()
         
         if not alerts:
@@ -406,11 +410,9 @@ async def check_alerts(context: CallbackContext):
         
         logger.info(f"Checking {len(alerts)} alerts...")
         
-        for user_id, currency_id, currency_symbol, threshold, last_price in alerts:
-            current_price_data = get_price(currency_id)
-            
-            if current_price_data and current_price_data.get('usd') and last_price:
-                current_price = current_price_data['usd']
+        for user_id, currency, pair_id, threshold, last_price in alerts:
+            current_price = get_price(currency)
+            if current_price and last_price:
                 change_percent = ((current_price - last_price) / last_price) * 100
                 
                 if abs(change_percent) >= threshold:
@@ -419,7 +421,7 @@ async def check_alerts(context: CallbackContext):
                         
                         message = (
                             f"{emoji} **هشدار قیمت ارز دیجیتال!**\n\n"
-                            f"• ارز: {currency_symbol}\n"
+                            f"• ارز: {currency}\n"
                             f"• تغییر: {change_percent:+.1f}%\n"
                             f"• قیمت قبلی: ${last_price:,.2f}\n"
                             f"• قیمت فعلی: ${current_price:,.2f}\n"
@@ -428,10 +430,10 @@ async def check_alerts(context: CallbackContext):
                         )
                         
                         await context.bot.send_message(chat_id=user_id, text=message, parse_mode='Markdown')
-                        c.execute('UPDATE alerts SET last_price = ? WHERE user_id = ? AND currency_id = ?',
-                                 (current_price, user_id, currency_id))
+                        c.execute('UPDATE alerts SET last_price = ? WHERE user_id = ? AND currency = ?',
+                                 (current_price, user_id, currency))
                         
-                        logger.info(f"Alert sent to {user_id} for {currency_symbol}: {change_percent:.1f}%")
+                        logger.info(f"Alert sent to {user_id} for {currency}: {change_percent:.1f}%")
                         
                     except Exception as e:
                         logger.error(f"Error sending alert to {user_id}: {e}")
@@ -459,7 +461,7 @@ def main():
         job_queue = application.job_queue
         job_queue.run_repeating(check_alerts, interval=30, first=10)
         
-        logger.info("Starting CoinGecko bot...")
+        logger.info("Starting bot...")
         application.run_polling()
         
     except Exception as e:
