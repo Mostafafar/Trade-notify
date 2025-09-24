@@ -1,18 +1,52 @@
 import requests
 
 API_KEY = "pdb9zpy2vxpdijlyx5x5"
+base_url = "https://api.freecryptoapi.com/v1"
 
-# تست با symbol
-url = f"https://api.freecryptoapi.com/v1/getData.php?api_key={API_KEY}&symbol=BTC"
+# تست پارامترهای مختلف
+test_params = [
+    {"api_key": API_KEY, "symbol": "BTC"},
+    {"api_key": API_KEY, "fsym": "BTC", "tsym": "USD"},
+    {"api_key": API_KEY, "coin": "BTC"},
+    {"api_key": API_KEY, "crypto": "BTC"},
+    {"api_key": API_KEY, "currency": "BTC"},
+    {"api_key": API_KEY}  # بدون پارامتر اضافی
+]
 
-response = requests.get(url, timeout=10)
-print(f"URL: {url}")
-print(f"Status: {response.status_code}")
-print(f"Response: {response.text}")
+for i, params in enumerate(test_params):
+    try:
+        url = f"{base_url}/getData.php"
+        response = requests.get(url, params=params, timeout=10)
+        print(f"Test {i+1}: {params}")
+        print(f"Status: {response.status_code}")
+        print(f"Response: {response.text}")
+        print("-" * 50)
+    except Exception as e:
+        print(f"Test {i+1} Error: {e}")
+        print("-" * 50)
 
-# تست بدون symbol برای گرفتن لیست همه ارزها
-url_all = f"https://api.freecryptoapi.com/v1/getData.php?api_key={API_KEY}"
-response_all = requests.get(url_all, timeout=10)
-print(f"\nURL (all): {url_all}")
-print(f"Status: {response_all.status_code}")
-print(f"Response: {response_all.text[:500]}")
+# تست endpointهای مختلف
+endpoints = [
+    "/getData.php",
+    "/getCryptoList.php", 
+    "/getPrice.php",
+    "/markets.php",
+    "/cryptocurrencies.php"
+]
+
+for endpoint in endpoints:
+    try:
+        url = f"{base_url}{endpoint}"
+        params = {"api_key": API_KEY}
+        response = requests.get(url, params=params, timeout=10)
+        print(f"Endpoint: {endpoint}")
+        print(f"Status: {response.status_code}")
+        if response.status_code == 200:
+            print(f"Success! Length: {len(response.text)}")
+            print(f"Preview: {response.text[:200]}")
+        else:
+            print(f"Error: {response.text[:200]}")
+        print("=" * 50)
+    except Exception as e:
+        print(f"Endpoint {endpoint} Error: {e}")
+        print("=" * 50)
