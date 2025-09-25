@@ -113,6 +113,17 @@ class CryptoPriceBot:
         else:
             trend_emoji = "➡️"
         
+        # ایموجی مخصوص هر ارز
+        coin_emojis = {
+            'BTC': '₿',
+            'ETH': 'Ξ',
+            'USDT': '💵',
+            'BNB': '💎',
+            'XRP': '✳️',
+            'ADA': '🅰️'
+        }
+        coin_emoji = coin_emojis.get(symbol, '💰')
+        
         # فرمت‌بندی قیمت
         if price > 1000:
             formatted_price = f"{price:,.0f}"
@@ -122,10 +133,10 @@ class CryptoPriceBot:
             formatted_price = f"{price:.6f}"
         
         message = f"""
-{trad_emoji} **{symbol} ({price_data['coin'].capitalize()})**
+{coin_emoji} **{symbol} ({price_data['coin'].capitalize()})**
 
 💰 قیمت: **{formatted_price} {currency}**
-{tend_emoji} تغییر 24h: **{change}%**
+{trend_emoji} تغییر 24h: **{change}%**
 ⏰ زمان: {timestamp}
         """
         
@@ -152,6 +163,17 @@ class CryptoPriceBot:
             else:
                 trend_emoji = "➡️"
             
+            # ایموجی مخصوص هر ارز
+            coin_emojis = {
+                'BTC': '₿',
+                'ETH': 'Ξ', 
+                'USDT': '💵',
+                'BNB': '💎',
+                'XRP': '✳️',
+                'ADA': '🅰️'
+            }
+            coin_emoji = coin_emojis.get(symbol, '💰')
+            
             # فرمت‌بندی قیمت
             if price > 1000:
                 formatted_price = f"{price:,.0f}"
@@ -160,7 +182,7 @@ class CryptoPriceBot:
             else:
                 formatted_price = f"{price:.6f}"
             
-            message += f"{trend_emoji} **{symbol}**: {formatted_price} {currency} ({change}%)\n"
+            message += f"{coin_emoji} {trend_emoji} **{symbol}**: {formatted_price} {currency} ({change}%)\n"
         
         message += f"\n⏰ آخرین بروزرسانی: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         return message
@@ -182,14 +204,19 @@ def main():
     eth_price = bot.get_price('ethereum', 'usd')
     print(bot.format_price_message(eth_price))
     
+    # تست دریافت قیمت تتر
+    print("\n3. تست دریافت قیمت تتر:")
+    usdt_price = bot.get_price('tether', 'usd')
+    print(bot.format_price_message(usdt_price))
+    
     # تست دریافت چند قیمت
-    print("\n3. تست دریافت چند قیمت:")
+    print("\n4. تست دریافت چند قیمت:")
     coins = ['bitcoin', 'ethereum', 'tether', 'binancecoin']
     multiple_prices = bot.get_multiple_prices(coins, 'usd')
     print(bot.format_multiple_prices_message(multiple_prices))
     
     # تست خطا (ارز ناموجود)
-    print("\n4. تست خطا (ارز ناموجود):")
+    print("\n5. تست خطا (ارز ناموجود):")
     error_test = bot.get_price('invalid_coin', 'usd')
     print(bot.format_price_message(error_test))
 
