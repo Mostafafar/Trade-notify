@@ -33,7 +33,8 @@ class CoinMonitor:
             params = {
                 'ids': coin_id,
                 'vs_currencies': 'usd',
-                'include_24hr_change': 'true'
+                'include_24hr_change': 'true',
+                'precision': 'full'  # افزایش دقت
             }
             
             response = requests.get(url, params=params, timeout=10)
@@ -100,6 +101,18 @@ def load_user_data():
     except Exception as e:
         logger.error(f"Error loading user data: {e}")
 
+def format_price(price):
+    """فرمت‌دهی قیمت با ۶ رقم اعشار"""
+    if isinstance(price, (int, float)):
+        return f"${price:,.6f}"
+    return str(price)
+
+def format_percent(percent):
+    """فرمت‌دهی درصد با ۴ رقم اعشار"""
+    if isinstance(percent, (int, float)):
+        return f"{percent:.4f}%"
+    return str(percent)
+
 async def start(update: Update, context: CallbackContext) -> None:
     """دستور شروع"""
     user_id = update.effective_user.id
@@ -108,7 +121,7 @@ async def start(update: Update, context: CallbackContext) -> None:
 
 🔸 **دستورات موجود:**
 /search [نام ارز] - جستجوی ارز (مثال: /search bitcoin)
-/set [id ارز] [درصد] - تنظیم مانیتورینگ (مثال: /set bitcoin 5)
+/set [id ارز] [درصد] - تنظیم مانیتورینگ (مثال: /set bitcoin 0.5)
 /list - نمایش لیست ارزهای تحت مانیتورینگ
 /remove [id ارز] - حذف ارز از لیست مانیتورینگ
 /help - راهنما
@@ -118,9 +131,13 @@ async def start(update: Update, context: CallbackContext) -> None:
 /search bitcoin
 
 2. سپس مانیتورینگ را تنظیم کنید:
-/set bitcoin 5
+/set bitcoin 0.5
 
-ربات هرگاه قیمت 5% تغییر کند به شما اطلاع می‌دهد.
+ربات هرگاه قیمت 0.5% تغییر کند به شما اطلاع می‌دهد.
+
+🔸 **دقت:**
+- قیمت‌ها با ۶ رقم اعشار نمایش داده می‌شوند
+- درصد تغییرات با دقت بالا محاسبه می‌شود
     """
     await update.message.reply_text(welcome_text)
 
@@ -147,13 +164,13 @@ async def search_coin(update: Update, context: CallbackContext) -> None:
         response += f"   ID: `{coin['id']}`\n"
         response += f"   رتبه بازار: {coin['market_cap_rank']}\n\n"
     
-    response += "🔹 برای تنظیم مانیتورینگ از دستور /set استفاده کنید.\nمثال: /set bitcoin 5"
+    response += "🔹 برای تنظیم مانیتورینگ از دستور /set استفاده کنید.\nمثال: /set bitcoin 0.5"
     await update.message.reply_text(response)
 
 async def set_monitor(update: Update, context: CallbackContext) -> None:
     """تنظیم مانیتورینگ برای یک ارز"""
     if len(context.args) != 2:
-        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: /set bitcoin 5")
+        await update.message.reply_text("❌ فرمت دستور نادرست است.\nمثال: /set bitcoin 0.5")
         return
     
     coin_id = context.args[0].lower()
@@ -161,6 +178,9 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
         percent = float(context.args[1])
         if percent <= 0:
             await update.message.reply_text("❌ درصد باید بزرگتر از صفر باشد.")
+            return
+        if percent < 0.001:  # حداقل 0.001%
+            await update.message.reply_text("❌ درصد تغییر بسیار کوچک است. حداقل 0.001% مجاز است.")
             return
     except ValueError:
         await update.message.reply_text("❌ درصد باید یک عدد باشد.")
@@ -191,9 +211,9 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
     await update.message.reply_text(
         f"✅ **مانیتورینگ تنظیم شد**\n\n"
         f"🔸 ارز: {coin_id.upper()}\n"
-        f"🔸 درصد تغییر: {percent}%\n"
-        f"🔸 قیمت فعلی: ${price_data['price']:,.2f}\n\n"
-        f"ربات هنگام تغییر قیمت ±{percent}% به شما اطلاع می‌دهد."
+        f"🔸 درصد تغییر: {format_percent(percent)}\n"
+        f"🔸 قیمت فعلی: {format_price(price_data['price'])}\n\n"
+        f"ربات هنگام تغییر قیمت ±{format_percent(percent)} به شما اطلاع می‌دهد."
     )
 
 async def list_monitors(update: Update, context: CallbackContext) -> None:
@@ -207,12 +227,10 @@ async def list_monitors(update: Update, context: CallbackContext) -> None:
     response = "📊 **ارزهای تحت مانیتورینگ:**\n\n"
     for coin_id, settings in user_settings[user_id].items():
         current_price = last_prices.get(coin_id, 'نامعلوم')
-        if isinstance(current_price, (int, float)):
-            current_price = f"${current_price:,.2f}"
         
         response += f"🔸 **{coin_id.upper()}**\n"
-        response += f"   درصد تغییر: {settings['percent']}%\n"
-        response += f"   قیمت فعلی: {current_price}\n\n"
+        response += f"   درصد تغییر: {format_percent(settings['percent'])}\n"
+        response += f"   قیمت فعلی: {format_price(current_price)}\n\n"
     
     await update.message.reply_text(response)
 
@@ -247,7 +265,7 @@ async def help_command(update: Update, context: CallbackContext) -> None:
 
 🔹 **تنظیم مانیتورینگ:**
 /set [id ارز] [درصد]
-مثال: /set bitcoin 5
+مثال: /set bitcoin 0.5
 
 🔹 **مشاهده لیست:**
 /list
@@ -257,9 +275,11 @@ async def help_command(update: Update, context: CallbackContext) -> None:
 مثال: /remove bitcoin
 
 🔹 **نکات:**
-- درصد تغییر باید عددی مثبت باشد
+- درصد تغییر باید عددی مثبت باشد (حداقل 0.001%)
 - از ID صحیح ارز استفاده کنید (با /search پیدا کنید)
 - ربات هر 60 ثانیه قیمت‌ها را چک می‌کند
+- قیمت‌ها با دقت ۶ رقم اعشار نمایش داده می‌شوند
+- درصد تغییرات با دقت ۴ رقم اعشار محاسبه می‌شود
     """
     await update.message.reply_text(help_text)
 
@@ -296,7 +316,7 @@ async def price_checker(context: CallbackContext) -> None:
                     settings = coins[coin_id]
                     percent_threshold = settings['percent']
                     
-                    # محاسبه درصد تغییر
+                    # محاسبه درصد تغییر با دقت بالا
                     price_change = ((new_price - old_price) / old_price) * 100
                     
                     # بررسی آیا تغییر به اندازه آستانه رسیده است
@@ -307,10 +327,10 @@ async def price_checker(context: CallbackContext) -> None:
                             f"🚨 **تغییر قیمت قابل توجه**\n\n"
                             f"🔸 ارز: {coin_id.upper()}\n"
                             f"🔸 جهت: {direction}\n"
-                            f"🔸 تغییر: {price_change:+.2f}%\n"
-                            f"🔸 قیمت قبلی: ${old_price:,.2f}\n"
-                            f"🔸 قیمت جدید: ${new_price:,.2f}\n"
-                            f"🔸 آستانه: {percent_threshold}%"
+                            f"🔸 تغییر: {price_change:+.4f}%\n"
+                            f"🔸 قیمت قبلی: {format_price(old_price)}\n"
+                            f"🔸 قیمت جدید: {format_price(new_price)}\n"
+                            f"🔸 آستانه: {format_percent(percent_threshold)}"
                         )
                         
                         try:
