@@ -304,17 +304,18 @@ async def price_checker(context: CallbackContext) -> None:
                 continue
             
             new_price = price_data['price']
-            old_price = last_prices.get(coin_id)
-            
-            if old_price is None:
-                last_prices[coin_id] = new_price
-                continue
             
             # بررسی برای هر کاربر
             for user_id, coins in user_settings.items():
                 if coin_id in coins:
                     settings = coins[coin_id]
                     percent_threshold = settings['percent']
+                    old_price = settings['last_price']  # قیمت ذخیره شده برای این کاربر
+                    
+                    if old_price is None:
+                        # اولین بار - فقط ذخیره کن
+                        user_settings[user_id][coin_id]['last_price'] = new_price
+                        continue
                     
                     # محاسبه درصد تغییر با دقت بالا
                     price_change = ((new_price - old_price) / old_price) * 100
@@ -338,14 +339,15 @@ async def price_checker(context: CallbackContext) -> None:
                                 chat_id=user_id, 
                                 text=message
                             )
-                            
-                            # به‌روزرسانی قیمت آخر برای جلوگیری از اعلان‌های تکراری
-                            user_settings[user_id][coin_id]['last_price'] = new_price
+                            logger.info(f"Notification sent to {user_id} for {coin_id}: {price_change:+.4f}%")
                             
                         except Exception as e:
                             logger.error(f"Error sending notification to {user_id}: {e}")
+                    
+                    # همیشه قیمت را به‌روز کن (حتی اگر اعلان ارسال نشد)
+                    user_settings[user_id][coin_id]['last_price'] = new_price
             
-            # به‌روزرسانی قیمت آخر
+            # به‌روزرسانی قیمت جهانی
             last_prices[coin_id] = new_price
         
         save_user_data()
