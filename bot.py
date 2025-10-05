@@ -282,7 +282,6 @@ async def help_command(update: Update, context: CallbackContext) -> None:
 - درصد تغییرات با دقت ۴ رقم اعشار محاسبه می‌شود
     """
     await update.message.reply_text(help_text)
-
 async def price_checker(context: CallbackContext) -> None:
     """بررسی دوره‌ای قیمت‌ها و ارسال اعلان"""
     if not user_settings:
@@ -310,15 +309,10 @@ async def price_checker(context: CallbackContext) -> None:
                 if coin_id in coins:
                     settings = coins[coin_id]
                     percent_threshold = settings['percent']
-                    old_price = settings['last_price']  # قیمت ذخیره شده برای این کاربر
+                    user_last_price = settings['last_price']  # قیمت آخر برای این کاربر
                     
-                    if old_price is None:
-                        # اولین بار - فقط ذخیره کن
-                        user_settings[user_id][coin_id]['last_price'] = new_price
-                        continue
-                    
-                    # محاسبه درصد تغییر با دقت بالا
-                    price_change = ((new_price - old_price) / old_price) * 100
+                    # محاسبه درصد تغییر نسبت به آخرین قیمت کاربر
+                    price_change = ((new_price - user_last_price) / user_last_price) * 100
                     
                     # بررسی آیا تغییر به اندازه آستانه رسیده است
                     if abs(price_change) >= percent_threshold:
@@ -329,7 +323,7 @@ async def price_checker(context: CallbackContext) -> None:
                             f"🔸 ارز: {coin_id.upper()}\n"
                             f"🔸 جهت: {direction}\n"
                             f"🔸 تغییر: {price_change:+.4f}%\n"
-                            f"🔸 قیمت قبلی: {format_price(old_price)}\n"
+                            f"🔸 قیمت قبلی: {format_price(user_last_price)}\n"
                             f"🔸 قیمت جدید: {format_price(new_price)}\n"
                             f"🔸 آستانه: {format_percent(percent_threshold)}"
                         )
@@ -339,23 +333,20 @@ async def price_checker(context: CallbackContext) -> None:
                                 chat_id=user_id, 
                                 text=message
                             )
-                            logger.info(f"Notification sent to {user_id} for {coin_id}: {price_change:+.4f}%")
+                            
+                            # 🔥 مهم: به‌روزرسانی قیمت آخر برای این کاربر
+                            user_settings[user_id][coin_id]['last_price'] = new_price
+                            save_user_data()  # ذخیره فوری
                             
                         except Exception as e:
                             logger.error(f"Error sending notification to {user_id}: {e}")
-                    
-                    # همیشه قیمت را به‌روز کن (حتی اگر اعلان ارسال نشد)
-                    user_settings[user_id][coin_id]['last_price'] = new_price
             
-            # به‌روزرسانی قیمت جهانی
+            # به‌روزرسانی قیمت کلی
             last_prices[coin_id] = new_price
-        
-        save_user_data()
         
     except Exception as e:
         logger.error(f"Error in price checker: {e}")
-
-def main() -> None:
+ main() -> None:
     """تابع اصلی"""
     # بارگذاری داده‌های ذخیره شده
     load_user_data()
