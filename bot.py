@@ -346,7 +346,8 @@ async def price_checker(context: CallbackContext) -> None:
         
     except Exception as e:
         logger.error(f"Error in price checker: {e}")
- main() -> None:
+
+def main() -> None:
     """تابع اصلی"""
     # بارگذاری داده‌های ذخیره شده
     load_user_data()
