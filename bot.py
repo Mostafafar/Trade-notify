@@ -568,7 +568,7 @@ def main() -> None:
     """تابع اصلی"""
     load_user_data()
     
-    application = Application.builder().token(BOT_TOKEN).job_queue().build()
+    application = Application.builder().token(BOT_TOKEN).build()
     
     # دستورات
     application.add_handler(CommandHandler("start", start))
@@ -587,7 +587,10 @@ def main() -> None:
     
     # Job برای چک کردن قیمت‌ها
     job_queue = application.job_queue
-    job_queue.run_repeating(price_checker, interval=60, first=10)
+    if job_queue:
+        job_queue.run_repeating(price_checker, interval=60, first=10)
+    else:
+        logger.warning("Job queue is not available. Price checker will not run.")
     
     logger.info("🚀 Bot started successfully!")
     application.run_polling()
