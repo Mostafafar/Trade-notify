@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 # توکن ربات تلگرام
 BOT_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
-# 🔑 آیدی عددی ادمین (باید با آیدی تلگرام خودتان جایگزین کنید)
+# 🔑 آیدی عددی ادمین
 ADMIN_ID = 6680287530
 
 # دیکشنری برای ذخیره تنظیمات کاربران
@@ -29,6 +29,8 @@ last_prices = {}
 users_info = {}
 # حالت ارسال پیام گروهی برای ادمین
 admin_broadcast_mode = {}
+# پرچم برای کنترل حلقه قیمت
+price_checker_running = False
 
 class CoinMonitor:
     def __init__(self):
@@ -643,6 +645,8 @@ async def price_checker(context: CallbackContext) -> None:
     if not user_settings:
         return
     
+    logger.info("🔄 Running price checker...")
+    
     try:
         coins_to_check = set()
         for user_id, coins in user_settings.items():
@@ -706,6 +710,7 @@ async def price_checker(context: CallbackContext) -> None:
                             # به‌روزرسانی قیمت آخر برای این هشدار
                             alert['last_price'] = new_price
                             save_user_data()
+                            logger.info(f"✅ Notification sent to user {user_id} for {coin_id}")
                         except Exception as e:
                             logger.error(f"Error sending notification to {user_id}: {e}")
             
@@ -714,6 +719,32 @@ async def price_checker(context: CallbackContext) -> None:
     except Exception as e:
         logger.error(f"Error in price checker: {e}")
 
+async def price_checker_loop(context: CallbackContext):
+    """حلقه نامحدود برای بررسی قیمت‌ها"""
+    global price_checker_running
+    price_checker_running = True
+    logger.info("🔄 Price checker loop started!")
+    
+    while price_checker_running:
+        try:
+            await price_checker(context)
+        except Exception as e:
+            logger.error(f"Error in price checker loop: {e}")
+        await asyncio.sleep(60)  # هر 60 ثانیه یک بار
+
+async def test_check(update: Update, context: CallbackContext) -> None:
+    """تست دستی بررسی قیمت‌ها"""
+    user_id = update.effective_user.id
+    
+    # فقط ادمین می‌تونه تست کنه
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ فقط ادمین می‌تونه این دستور رو اجرا کنه.")
+        return
+    
+    await update.message.reply_text("🔄 در حال بررسی قیمت‌ها...")
+    await price_checker(context)
+    await update.message.reply_text("✅ بررسی کامل شد!")
+
 async def cancel_broadcast(update: Update, context: CallbackContext) -> None:
     """لغو ارسال همگانی"""
     user_id = update.effective_user.id
@@ -721,8 +752,31 @@ async def cancel_broadcast(update: Update, context: CallbackContext) -> None:
         admin_broadcast_mode[user_id] = False
         await update.message.reply_text("❌ ارسال همگانی لغو شد.", reply_markup=get_admin_keyboard())
 
+async def status_command(update: Update, context: CallbackContext) -> None:
+    """نمایش وضعیت بات"""
+    user_id = update.effective_user.id
+    
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("❌ فقط ادمین می‌تونه این دستور رو اجرا کنه.")
+        return
+    
+    total_users = len(users_info)
+    total_alerts = sum(len(alerts) for u in user_settings.values() for alerts in u.values())
+    
+    status_text = f"""
+📊 **وضعیت بات**
+
+🔄 قیمت‌ها: {'فعال' if price_checker_running else 'غیرفعال'}
+👥 تعداد کاربران: {total_users}
+🔔 تعداد هشدارها: {total_alerts}
+⏱️ آخرین بروزرسانی: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    """
+    await update.message.reply_text(status_text)
+
 def main() -> None:
     """تابع اصلی"""
+    global price_checker_running
+    
     load_user_data()
     
     application = Application.builder().token(BOT_TOKEN).build()
@@ -736,6 +790,8 @@ def main() -> None:
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("cancel", cancel_broadcast))
+    application.add_handler(CommandHandler("test", test_check))
+    application.add_handler(CommandHandler("status", status_command))
     
     # کالبک‌های منو
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -743,15 +799,12 @@ def main() -> None:
     # مدیریت پیام‌های متنی (برای broadcast)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast))
     
-    # Job برای چک کردن قیمت‌ها
-    job_queue = application.job_queue
-    if job_queue:
-        job_queue.run_repeating(price_checker, interval=60, first=10)
-        logger.info("✅ Price checker scheduled!")
-    else:
-        logger.warning("⚠️ Job queue is not available!")
+    # شروع حلقه بررسی قیمت‌ها در پس‌زمینه
+    loop = asyncio.get_event_loop()
+    loop.create_task(price_checker_loop(application))
+    price_checker_running = True
     
-    logger.info("🚀 Bot started successfully!")
+    logger.info("🚀 Bot started successfully with price checker loop!")
     application.run_polling()
 
 if __name__ == '__main__':
