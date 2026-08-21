@@ -1,8 +1,8 @@
 import os
 import logging
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackContext, MessageHandler, filters, CallbackQueryHandler
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
+from telegram.ext import Application, CommandHandler, CallbackContext, MessageHandler, filters, CallbackQueryHandler, InlineQueryHandler
 import requests
 from datetime import datetime
 import json
@@ -17,20 +17,21 @@ logger = logging.getLogger(__name__)
 # توکن ربات تلگرام
 BOT_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
-# 🔑 آیدی عددی ادمین
+# آیدی عددی ادمین
 ADMIN_ID = 6680287530
 
-# دیکشنری برای ذخیره تنظیمات کاربران
-# ساختار: {user_id: {coin_id: [{'percent': 0.5, 'direction': 'both', 'last_price': 45000}]}}
+# دیکشنری‌ها
 user_settings = {}
-# دیکشنری برای ذخیره آخرین قیمت‌ها
 last_prices = {}
-# دیکشنری برای ذخیره اطلاعات کاربران
 users_info = {}
-# حالت ارسال پیام گروهی برای ادمین
 admin_broadcast_mode = {}
-# پرچم برای کنترل حلقه قیمت
 price_checker_running = False
+
+# دیکشنری برای ذخیره آمار دستورات پرکاربرد
+command_stats = {}
+
+# لیست ارزهای محبوب برای پیشنهاد سریع
+POPULAR_COINS = ['bitcoin', 'ethereum', 'solana', 'cardano', 'ripple', 'dogecoin', 'polkadot', 'avalanche']
 
 class CoinMonitor:
     def __init__(self):
@@ -92,7 +93,8 @@ def save_user_data():
         data = {
             'user_settings': user_settings,
             'last_prices': last_prices,
-            'users_info': users_info
+            'users_info': users_info,
+            'command_stats': command_stats
         }
         with open('user_data.json', 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -101,7 +103,7 @@ def save_user_data():
 
 def load_user_data():
     """بارگذاری داده‌های کاربر از فایل"""
-    global user_settings, last_prices, users_info
+    global user_settings, last_prices, users_info, command_stats
     try:
         if os.path.exists('user_data.json'):
             with open('user_data.json', 'r', encoding='utf-8') as f:
@@ -109,12 +111,26 @@ def load_user_data():
                 user_settings = data.get('user_settings', {})
                 last_prices = data.get('last_prices', {})
                 users_info = data.get('users_info', {})
+                command_stats = data.get('command_stats', {})
                 
                 # تبدیل کلیدها به int
                 user_settings = {int(k): v for k, v in user_settings.items()}
                 users_info = {int(k): v for k, v in users_info.items()}
     except Exception as e:
         logger.error(f"Error loading user data: {e}")
+
+def update_command_stats(command):
+    """به‌روزرسانی آمار استفاده از دستورات"""
+    if command in command_stats:
+        command_stats[command] += 1
+    else:
+        command_stats[command] = 1
+    save_user_data()
+
+def get_popular_commands(limit=5):
+    """دریافت پرکاربردترین دستورات"""
+    sorted_commands = sorted(command_stats.items(), key=lambda x: x[1], reverse=True)
+    return [cmd for cmd, count in sorted_commands[:limit]]
 
 def format_price(price):
     """فرمت‌دهی قیمت با ۶ رقم اعشار"""
@@ -180,7 +196,6 @@ async def start(update: Update, context: CallbackContext) -> None:
     }
     save_user_data()
     
-    # اطلاع به ادمین در صورت کاربر جدید بودن
     if is_new_user:
         await notify_admin_new_user(context, user)
     
@@ -189,18 +204,16 @@ async def start(update: Update, context: CallbackContext) -> None:
 
 🤖 **به ربات مانیتورینگ قیمت ارزهای دیجیتال خوش آمدید**
 
-این ربات به شما کمک می‌کند تا تغییرات قیمت ارزهای دیجیتال را به صورت لحظه‌ای رصد کنید.
+🔹 **امکانات جدید:**
+✅ جستجوی زنده با تایپ `@bot_name` در چت
+✅ پیشنهاد هوشمند بر اساس دستورات پرکاربرد
+✅ تنظیم هشدار با جهت دلخواه (صعودی/نزولی)
 
-🔹 **امکانات:**
-✅ جستجوی آسان ارزهای دیجیتال
-✅ تنظیم هشدار تغییر قیمت (با جهت دلخواه)
-✅ نمایش قیمت با دقت بالا (۶ رقم اعشار)
-✅ اعلان خودکار تغییرات
+📌 **نکته:** برای جستجوی سریع، در هر چتی اسم بات رو تایپ کنید!
 
 از منوی زیر انتخاب کنید 👇
     """
     
-    # نمایش منوی متناسب با نقش کاربر
     if user_id == ADMIN_ID:
         await update.message.reply_text(
             welcome_text + "\n\n⭐ **شما ادمین ربات هستید**",
@@ -208,6 +221,100 @@ async def start(update: Update, context: CallbackContext) -> None:
         )
     else:
         await update.message.reply_text(welcome_text, reply_markup=get_main_keyboard())
+
+async def inline_query_handler(update: Update, context: CallbackContext) -> None:
+    """مدیریت جستجوی زنده (Inline Mode)"""
+    query = update.inline_query.query.lower().strip()
+    user_id = update.inline_query.from_user.id
+    
+    results = []
+    
+    # اگر جستجو خالی بود، دستورات محبوب رو نشون بده
+    if not query:
+        popular_commands = get_popular_commands(5)
+        if popular_commands:
+            for cmd in popular_commands:
+                results.append(
+                    InlineQueryResultArticle(
+                        id=f"popular_{cmd}",
+                        title=f"🔥 {cmd} (پرکاربرد)",
+                        input_message_content=InputTextMessageContent(f"/{cmd}"),
+                        description="دستور پرکاربرد"
+                    )
+                )
+        
+        # اضافه کردن ارزهای محبوب
+        for coin in POPULAR_COINS[:3]:
+            results.append(
+                InlineQueryResultArticle(
+                    id=f"popular_coin_{coin}",
+                    title=f"💰 {coin.capitalize()}",
+                    input_message_content=InputTextMessageContent(f"/search {coin}"),
+                    description=f"جستجوی {coin.capitalize()}"
+                )
+            )
+    else:
+        # جستجوی ارزها
+        coins = coin_monitor.search_coin(query)
+        if coins:
+            for coin in coins[:5]:
+                # دریافت قیمت برای نمایش
+                price_data = coin_monitor.get_coin_price(coin['id'])
+                price_text = f"💰 ${price_data['price']:,.2f}" if price_data else "📊 قیمت نامشخص"
+                
+                results.append(
+                    InlineQueryResultArticle(
+                        id=f"coin_{coin['id']}",
+                        title=f"{coin['name']} ({coin['symbol'].upper()})",
+                        input_message_content=InputTextMessageContent(
+                            f"🔍 **{coin['name']} ({coin['symbol'].upper()})**\n"
+                            f"{price_text}\n"
+                            f"📊 رتبه: {coin['market_cap_rank']}\n\n"
+                            f"برای تنظیم هشدار:\n"
+                            f"`/set {coin['id']} 0.5`"
+                        ),
+                        description=price_text,
+                        thumbnail_url="https://coin-images.coingecko.com/coins/images/1/small/bitcoin.png?1696501400"
+                    )
+                )
+        
+        # جستجوی دستورات
+        commands = ['search', 'set', 'list', 'remove', 'help', 'admin']
+        for cmd in commands:
+            if cmd.startswith(query):
+                results.append(
+                    InlineQueryResultArticle(
+                        id=f"cmd_{cmd}",
+                        title=f"/{cmd}",
+                        input_message_content=InputTextMessageContent(f"/{cmd}"),
+                        description=f"دستور {cmd}"
+                    )
+                )
+        
+        # پیشنهاد تنظیم هشدار سریع
+        if query in POPULAR_COINS or any(query in coin for coin in POPULAR_COINS):
+            coin_id = query.lower()
+            results.append(
+                InlineQueryResultArticle(
+                    id=f"quick_set_{coin_id}",
+                    title=f"⚡ تنظیم هشدار {coin_id.capitalize()} 0.5%",
+                    input_message_content=InputTextMessageContent(f"/set {coin_id} 0.5"),
+                    description="تنظیم سریع هشدار"
+                )
+            )
+    
+    # اگر نتیجه‌ای نبود
+    if not results:
+        results.append(
+            InlineQueryResultArticle(
+                id="no_result",
+                title="❌ نتیجه‌ای یافت نشد",
+                input_message_content=InputTextMessageContent("لطفاً عبارت دیگری را جستجو کنید."),
+                description="جستجوی جدید"
+            )
+        )
+    
+    await update.inline_query.answer(results, cache_time=5)
 
 async def button_callback(update: Update, context: CallbackContext) -> None:
     """مدیریت دکمه‌های منو"""
@@ -217,11 +324,17 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
     user_id = query.from_user.id
     data = query.data
     
+    # به‌روزرسانی آمار
+    update_command_stats("button_click")
+    
     if data == "menu_search":
         text = (
             "🔍 **جستجوی ارز**\n\n"
             "برای جستجو، از دستور زیر استفاده کنید:\n"
             "`/search نام_ارز`\n\n"
+            "**یا از جستجوی زنده استفاده کنید:**\n"
+            "در هر چتی اسم بات رو تایپ کنید:\n"
+            "`@TradeNotifyBot bitcoin`\n\n"
             "**مثال:**\n"
             "`/search bitcoin`\n"
             "`/search ethereum`"
@@ -263,6 +376,7 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
 
 🔹 **جستجوی ارز:**
 `/search bitcoin`
+یا `@TradeNotifyBot bitcoin`
 
 🔹 **تنظیم مانیتورینگ:**
 `/set bitcoin 0.5` (هر دو جهت)
@@ -279,7 +393,17 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
 • درصد حداقل 0.001٪ باشد
 • ربات هر 60 ثانیه چک می‌کند
 • قیمت‌ها با دقت بالا نمایش داده می‌شوند
+
+🔥 **دستورات پرکاربرد شما:**
         """
+        
+        popular = get_popular_commands(5)
+        if popular:
+            for cmd in popular:
+                help_text += f"\n• /{cmd}"
+        else:
+            help_text += "\n• هنوز دستوری استفاده نشده"
+        
         await query.edit_message_text(help_text, reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")
         ]]))
@@ -306,12 +430,13 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
 💰 تعداد ارزهای منحصربفرد: {total_coins}
 🔔 تعداد کل هشدارها: {total_alerts}
 
-**آخرین کاربران:**
+**دستورات پرکاربرد:**
         """
         
-        sorted_users = sorted(users_info.items(), key=lambda x: x[1]['last_seen'], reverse=True)[:5]
-        for uid, info in sorted_users:
-            text += f"\n• {info['first_name']} (@{info.get('username', 'بدون یوزرنیم')})"
+        popular = get_popular_commands(5)
+        if popular:
+            for cmd in popular:
+                text += f"\n• /{cmd}: {command_stats.get(cmd, 0)} بار"
         
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")
@@ -341,7 +466,6 @@ async def handle_broadcast(update: Update, context: CallbackContext) -> None:
             await update.message.reply_text("❌ ارسال همگانی لغو شد.", reply_markup=get_admin_keyboard())
             return
         
-        # ارسال پیام به همه کاربران
         success_count = 0
         fail_count = 0
         
@@ -370,6 +494,8 @@ async def handle_broadcast(update: Update, context: CallbackContext) -> None:
 
 async def search_coin(update: Update, context: CallbackContext) -> None:
     """جستجوی ارز"""
+    update_command_stats("search")
+    
     if not context.args:
         await update.message.reply_text(
             "❌ لطفاً نام ارز را وارد کنید.\n\n**مثال:**\n`/search bitcoin`",
@@ -406,6 +532,8 @@ async def search_coin(update: Update, context: CallbackContext) -> None:
 
 async def set_monitor(update: Update, context: CallbackContext) -> None:
     """تنظیم مانیتورینگ برای یک ارز با انتخاب جهت"""
+    update_command_stats("set")
+    
     if len(context.args) < 2 or len(context.args) > 3:
         await update.message.reply_text(
             "❌ فرمت نادرست!\n\n"
@@ -431,7 +559,6 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("❌ درصد باید یک عدد باشد.")
         return
     
-    # تعیین جهت هشدار
     direction = 'both'
     if len(context.args) == 3:
         direction_input = context.args[2].lower()
@@ -447,7 +574,6 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
     
     msg = await update.message.reply_text("⏳ در حال تنظیم...")
     
-    # دریافت قیمت فعلی ارز
     price_data = coin_monitor.get_coin_price(coin_id)
     if not price_data:
         await msg.edit_text("❌ ارز یافت نشد. لطفاً ابتدا با /search جستجو کنید.")
@@ -455,14 +581,12 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
     
     current_price = price_data['price']
     
-    # مقداردهی اولیه برای کاربر
     if user_id not in user_settings:
         user_settings[user_id] = {}
     
     if coin_id not in user_settings[user_id]:
         user_settings[user_id][coin_id] = []
     
-    # بررسی عدم تکراری بودن درصد و جهت
     for setting in user_settings[user_id][coin_id]:
         if abs(setting['percent'] - percent) < 0.0001 and setting['direction'] == direction:
             direction_names = {'up': 'صعودی', 'down': 'نزولی', 'both': 'هر دو جهت'}
@@ -472,7 +596,6 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
             )
             return
     
-    # اضافه کردن هشدار جدید
     user_settings[user_id][coin_id].append({
         'percent': percent,
         'direction': direction,
@@ -483,7 +606,6 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
     last_prices[coin_id] = current_price
     save_user_data()
     
-    # نمایش تعداد هشدارهای فعال برای این ارز
     alert_count = len(user_settings[user_id][coin_id])
     
     direction_names = {
@@ -505,6 +627,8 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
 
 async def list_monitors(update: Update, context: CallbackContext) -> None:
     """نمایش لیست ارزهای تحت مانیتورینگ با تمام هشدارها و جهت"""
+    update_command_stats("list")
+    
     user_id = update.effective_user.id
     
     if user_id not in user_settings or not user_settings[user_id]:
@@ -542,6 +666,8 @@ async def list_monitors(update: Update, context: CallbackContext) -> None:
 
 async def remove_monitor(update: Update, context: CallbackContext) -> None:
     """حذف یک هشدار خاص از لیست مانیتورینگ"""
+    update_command_stats("remove")
+    
     if len(context.args) < 2 or len(context.args) > 3:
         await update.message.reply_text(
             "❌ فرمت: `/remove bitcoin 0.5` یا `/remove bitcoin 0.5 up`"
@@ -555,7 +681,6 @@ async def remove_monitor(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("❌ درصد باید یک عدد باشد.")
         return
     
-    # اگر جهت مشخص شده
     direction = None
     if len(context.args) == 3:
         direction_input = context.args[2].lower()
@@ -571,7 +696,6 @@ async def remove_monitor(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("❌ این ارز در لیست شما نیست.")
         return
     
-    # پیدا کردن و حذف هشدار با درصد و جهت مشخص
     alerts = user_settings[user_id][coin_id]
     removed = False
     
@@ -591,7 +715,6 @@ async def remove_monitor(update: Update, context: CallbackContext) -> None:
         )
         return
     
-    # اگر لیست هشدارها خالی شد، ارز را حذف کن
     if not alerts:
         del user_settings[user_id][coin_id]
     
@@ -606,11 +729,14 @@ async def remove_monitor(update: Update, context: CallbackContext) -> None:
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     """دستور راهنما"""
+    update_command_stats("help")
+    
     help_text = """
 📖 **راهنمای کامل**
 
 🔹 **جستجو:**
 `/search bitcoin`
+یا `@TradeNotifyBot bitcoin`
 
 🔹 **تنظیم مانیتور:**
 `/set bitcoin 0.5` (هر دو جهت)
@@ -628,7 +754,17 @@ async def help_command(update: Update, context: CallbackContext) -> None:
 • بررسی هر 60 ثانیه
 • دقت 6 رقم اعشار
 • امکان تنظیم چندین هشدار برای یک ارز
+
+🔥 **دستورات پرکاربرد شما:**
     """
+    
+    popular = get_popular_commands(5)
+    if popular:
+        for cmd in popular:
+            help_text += f"\n• /{cmd}"
+    else:
+        help_text += "\n• هنوز دستوری استفاده نشده"
+    
     await update.message.reply_text(help_text, 
                                    reply_markup=get_main_keyboard() if update.effective_user.id != ADMIN_ID else get_admin_keyboard())
 
@@ -667,7 +803,6 @@ async def price_checker(context: CallbackContext) -> None:
                 if coin_id not in coins:
                     continue
                 
-                # بررسی همه هشدارهای این ارز برای کاربر
                 for alert in coins[coin_id]:
                     percent_threshold = alert['percent']
                     user_last_price = alert['last_price']
@@ -676,7 +811,6 @@ async def price_checker(context: CallbackContext) -> None:
                     price_change = ((new_price - user_last_price) / user_last_price) * 100
                     abs_change = abs(price_change)
                     
-                    # بررسی شرایط بر اساس جهت
                     should_notify = False
                     
                     if direction == 'both':
@@ -707,7 +841,6 @@ async def price_checker(context: CallbackContext) -> None:
                         
                         try:
                             await context.bot.send_message(chat_id=user_id, text=message)
-                            # به‌روزرسانی قیمت آخر برای این هشدار
                             alert['last_price'] = new_price
                             save_user_data()
                             logger.info(f"✅ Notification sent to user {user_id} for {coin_id}")
@@ -730,13 +863,12 @@ async def price_checker_loop(context: CallbackContext):
             await price_checker(context)
         except Exception as e:
             logger.error(f"Error in price checker loop: {e}")
-        await asyncio.sleep(60)  # هر 60 ثانیه یک بار
+        await asyncio.sleep(60)
 
 async def test_check(update: Update, context: CallbackContext) -> None:
     """تست دستی بررسی قیمت‌ها"""
     user_id = update.effective_user.id
     
-    # فقط ادمین می‌تونه تست کنه
     if user_id != ADMIN_ID:
         await update.message.reply_text("❌ فقط ادمین می‌تونه این دستور رو اجرا کنه.")
         return
@@ -762,6 +894,7 @@ async def status_command(update: Update, context: CallbackContext) -> None:
     
     total_users = len(users_info)
     total_alerts = sum(len(alerts) for u in user_settings.values() for alerts in u.values())
+    popular = get_popular_commands(3)
     
     status_text = f"""
 📊 **وضعیت بات**
@@ -770,7 +903,14 @@ async def status_command(update: Update, context: CallbackContext) -> None:
 👥 تعداد کاربران: {total_users}
 🔔 تعداد هشدارها: {total_alerts}
 ⏱️ آخرین بروزرسانی: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+🔥 **دستورات پرکاربرد:**
     """
+    
+    if popular:
+        for cmd in popular:
+            status_text += f"\n• /{cmd}: {command_stats.get(cmd, 0)} بار"
+    
     await update.message.reply_text(status_text)
 
 def main() -> None:
@@ -799,12 +939,15 @@ def main() -> None:
     # مدیریت پیام‌های متنی (برای broadcast)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_broadcast))
     
+    # مدیریت جستجوی زنده (Inline Mode)
+    application.add_handler(InlineQueryHandler(inline_query_handler))
+    
     # شروع حلقه بررسی قیمت‌ها در پس‌زمینه
     loop = asyncio.get_event_loop()
     loop.create_task(price_checker_loop(application))
     price_checker_running = True
     
-    logger.info("🚀 Bot started successfully with price checker loop!")
+    logger.info("🚀 Bot started successfully with Inline Search and Smart Suggestions!")
     application.run_polling()
 
 if __name__ == '__main__':
