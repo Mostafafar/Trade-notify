@@ -568,7 +568,7 @@ def main() -> None:
     """تابع اصلی"""
     load_user_data()
     
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).job_queue().build()
     
     # دستورات
     application.add_handler(CommandHandler("start", start))
