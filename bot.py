@@ -18,10 +18,10 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = "8000378956:AAGCV0la1WKApWSmVXxtA5o8Q6KqdwBjdqU"
 
 # 🔑 آیدی عددی ادمین (باید با آیدی تلگرام خودتان جایگزین کنید)
-# برای گرفتن آیدی: @userinfobot را در تلگرام استارت کنید
-ADMIN_ID = 6680287530  # 🔴 اینجا را با آیدی عددی خودتان تغییر دهید
+ADMIN_ID = 6680287530
 
 # دیکشنری برای ذخیره تنظیمات کاربران
+# ساختار: {user_id: {coin_id: [{'percent': 0.5, 'direction': 'both', 'last_price': 45000}]}}
 user_settings = {}
 # دیکشنری برای ذخیره آخرین قیمت‌ها
 last_prices = {}
@@ -191,7 +191,7 @@ async def start(update: Update, context: CallbackContext) -> None:
 
 🔹 **امکانات:**
 ✅ جستجوی آسان ارزهای دیجیتال
-✅ تنظیم هشدار تغییر قیمت
+✅ تنظیم هشدار تغییر قیمت (با جهت دلخواه)
 ✅ نمایش قیمت با دقت بالا (۶ رقم اعشار)
 ✅ اعلان خودکار تغییرات
 
@@ -233,13 +233,23 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
             text = "❌ هیچ ارزی برای مانیتورینگ تنظیم نشده است.\n\nابتدا با /search ارز مورد نظر را پیدا کنید."
         else:
             text = "📊 **ارزهای تحت مانیتورینگ:**\n\n"
-            for coin_id, settings in user_settings[user_id].items():
-                current_price = last_prices.get(coin_id, 'نامعلوم')
-                text += f"🔸 **{coin_id.upper()}**\n"
-                text += f"   درصد: {format_percent(settings['percent'])}\n"
-                text += f"   قیمت: {format_price(current_price)}\n\n"
+            direction_emoji = {'up': '📈', 'down': '📉', 'both': '↕️'}
+            direction_names = {'up': 'صعودی', 'down': 'نزولی', 'both': 'هر دو'}
             
-            text += "\n💡 برای حذف: `/remove نام_ارز`"
+            for coin_id, alerts in user_settings[user_id].items():
+                text += f"🔸 **{coin_id.upper()}**\n"
+                for i, alert in enumerate(alerts, 1):
+                    current_price = last_prices.get(coin_id, 'نامعلوم')
+                    text += (
+                        f"   {i}. {direction_emoji[alert['direction']]} "
+                        f"درصد: {format_percent(alert['percent'])} "
+                        f"| قیمت: {format_price(current_price)} "
+                        f"| جهت: {direction_names[alert['direction']]}\n"
+                    )
+                text += "\n"
+            
+            text += "💡 **حذف یک هشدار:**\n`/remove coin_id درصد جهت`\n"
+            text += "**مثال:** `/remove bitcoin 0.5 up`"
         
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔙 بازگشت", callback_data="menu_back")
@@ -253,14 +263,15 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
 `/search bitcoin`
 
 🔹 **تنظیم مانیتورینگ:**
-`/set bitcoin 0.5`
-(هشدار در تغییر 0.5 درصدی)
+`/set bitcoin 0.5` (هر دو جهت)
+`/set bitcoin 0.5 up` (فقط صعودی)
+`/set bitcoin 0.5 down` (فقط نزولی)
 
 🔹 **مشاهده لیست:**
 `/list`
 
 🔹 **حذف ارز:**
-`/remove bitcoin`
+`/remove bitcoin 0.5 up`
 
 📌 **نکات مهم:**
 • درصد حداقل 0.001٪ باشد
@@ -283,6 +294,7 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
         total_users = len(users_info)
         active_monitors = sum(1 for u in user_settings.values() if u)
         total_coins = len(set(coin for u in user_settings.values() for coin in u.keys()))
+        total_alerts = sum(len(alerts) for u in user_settings.values() for alerts in u.values())
         
         text = f"""
 📊 **آمار ربات**
@@ -290,6 +302,7 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
 👥 تعداد کل کاربران: {total_users}
 📈 کاربران با مانیتور فعال: {active_monitors}
 💰 تعداد ارزهای منحصربفرد: {total_coins}
+🔔 تعداد کل هشدارها: {total_alerts}
 
 **آخرین کاربران:**
         """
@@ -338,7 +351,7 @@ async def handle_broadcast(update: Update, context: CallbackContext) -> None:
             try:
                 await context.bot.send_message(chat_id=uid, text=broadcast_message)
                 success_count += 1
-                await asyncio.sleep(0.05)  # جلوگیری از محدودیت تلگرام
+                await asyncio.sleep(0.05)
             except Exception as e:
                 fail_count += 1
                 logger.error(f"Error sending to {uid}: {e}")
@@ -379,15 +392,26 @@ async def search_coin(update: Update, context: CallbackContext) -> None:
         response += f"   ID: `{coin['id']}`\n"
         response += f"   رتبه: {coin['market_cap_rank']}\n\n"
     
-    response += "🔹 **تنظیم مانیتورینگ:**\n`/set نام_ارز درصد`\n\n**مثال:**\n`/set bitcoin 0.5`"
+    response += "🔹 **تنظیم مانیتورینگ:**\n"
+    response += "`/set نام_ارز درصد جهت`\n\n"
+    response += "**مثال:**\n"
+    response += "`/set bitcoin 0.5` (هر دو جهت)\n"
+    response += "`/set bitcoin 0.5 up` (فقط صعودی)\n"
+    response += "`/set bitcoin 0.5 down` (فقط نزولی)"
+    
     await msg.edit_text(response, 
                        reply_markup=get_main_keyboard() if update.effective_user.id != ADMIN_ID else get_admin_keyboard())
 
 async def set_monitor(update: Update, context: CallbackContext) -> None:
-    """تنظیم مانیتورینگ برای یک ارز"""
-    if len(context.args) != 2:
+    """تنظیم مانیتورینگ برای یک ارز با انتخاب جهت"""
+    if len(context.args) < 2 or len(context.args) > 3:
         await update.message.reply_text(
-            "❌ فرمت نادرست!\n\n**فرمت صحیح:**\n`/set bitcoin 0.5`",
+            "❌ فرمت نادرست!\n\n"
+            "**فرمت‌های صحیح:**\n"
+            "`/set bitcoin 0.5` (هر دو جهت)\n"
+            "`/set bitcoin 0.5 up` (فقط صعودی)\n"
+            "`/set bitcoin 0.5 down` (فقط نزولی)\n\n"
+            "💡 می‌توانید چندین هشدار با درصدهای مختلف تنظیم کنید.",
             reply_markup=get_main_keyboard() if update.effective_user.id != ADMIN_ID else get_admin_keyboard()
         )
         return
@@ -405,38 +429,80 @@ async def set_monitor(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("❌ درصد باید یک عدد باشد.")
         return
     
+    # تعیین جهت هشدار
+    direction = 'both'
+    if len(context.args) == 3:
+        direction_input = context.args[2].lower()
+        if direction_input in ['up', 'down', 'both']:
+            direction = direction_input
+        else:
+            await update.message.reply_text(
+                "❌ جهت نامعتبر! از `up`، `down` یا `both` استفاده کنید."
+            )
+            return
+    
     user_id = update.effective_user.id
     
     msg = await update.message.reply_text("⏳ در حال تنظیم...")
     
+    # دریافت قیمت فعلی ارز
     price_data = coin_monitor.get_coin_price(coin_id)
     if not price_data:
         await msg.edit_text("❌ ارز یافت نشد. لطفاً ابتدا با /search جستجو کنید.")
         return
     
+    current_price = price_data['price']
+    
+    # مقداردهی اولیه برای کاربر
     if user_id not in user_settings:
         user_settings[user_id] = {}
     
-    user_settings[user_id][coin_id] = {
-        'percent': percent,
-        'last_price': price_data['price'],
-        'timestamp': datetime.now().isoformat()
-    }
+    if coin_id not in user_settings[user_id]:
+        user_settings[user_id][coin_id] = []
     
-    last_prices[coin_id] = price_data['price']
+    # بررسی عدم تکراری بودن درصد و جهت
+    for setting in user_settings[user_id][coin_id]:
+        if abs(setting['percent'] - percent) < 0.0001 and setting['direction'] == direction:
+            direction_names = {'up': 'صعودی', 'down': 'نزولی', 'both': 'هر دو جهت'}
+            await msg.edit_text(
+                f"❌ هشدار با درصد {format_percent(percent)} و جهت {direction_names[direction]} "
+                f"قبلاً برای {coin_id.upper()} تنظیم شده است."
+            )
+            return
+    
+    # اضافه کردن هشدار جدید
+    user_settings[user_id][coin_id].append({
+        'percent': percent,
+        'direction': direction,
+        'last_price': current_price,
+        'timestamp': datetime.now().isoformat()
+    })
+    
+    last_prices[coin_id] = current_price
     save_user_data()
     
+    # نمایش تعداد هشدارهای فعال برای این ارز
+    alert_count = len(user_settings[user_id][coin_id])
+    
+    direction_names = {
+        'up': '📈 فقط صعودی',
+        'down': '📉 فقط نزولی',
+        'both': '↕️ هر دو جهت'
+    }
+    
     await msg.edit_text(
-        f"✅ **مانیتورینگ فعال شد!**\n\n"
+        f"✅ **هشدار جدید اضافه شد!**\n\n"
         f"🔸 ارز: {coin_id.upper()}\n"
         f"🔸 درصد: {format_percent(percent)}\n"
-        f"🔸 قیمت: {format_price(price_data['price'])}\n\n"
-        f"🔔 هشدار در تغییر ±{format_percent(percent)}",
+        f"🔸 جهت: {direction_names[direction]}\n"
+        f"🔸 قیمت فعلی: {format_price(current_price)}\n"
+        f"🔸 تعداد هشدارهای فعال برای {coin_id.upper()}: {alert_count}\n\n"
+        f"🔔 هشدار در تغییر {format_percent(percent)} ({direction_names[direction]})",
         reply_markup=get_main_keyboard() if user_id != ADMIN_ID else get_admin_keyboard()
     )
 
 async def list_monitors(update: Update, context: CallbackContext) -> None:
-    """نمایش لیست ارزهای تحت مانیتورینگ"""
+    """نمایش لیست ارزهای تحت مانیتورینگ با تمام هشدارها و جهت"""
     user_id = update.effective_user.id
     
     if user_id not in user_settings or not user_settings[user_id]:
@@ -447,37 +513,94 @@ async def list_monitors(update: Update, context: CallbackContext) -> None:
         return
     
     response = "📊 **ارزهای تحت مانیتورینگ:**\n\n"
-    for coin_id, settings in user_settings[user_id].items():
-        current_price = last_prices.get(coin_id, 'نامعلوم')
-        response += f"🔸 **{coin_id.upper()}**\n"
-        response += f"   درصد: {format_percent(settings['percent'])}\n"
-        response += f"   قیمت: {format_price(current_price)}\n\n"
     
-    response += "💡 **حذف ارز:**\n`/remove نام_ارز`"
-    await update.message.reply_text(response, 
-                                   reply_markup=get_main_keyboard() if user_id != ADMIN_ID else get_admin_keyboard())
+    direction_emoji = {'up': '📈', 'down': '📉', 'both': '↕️'}
+    direction_names = {'up': 'صعودی', 'down': 'نزولی', 'both': 'هر دو'}
+    
+    for coin_id, alerts in user_settings[user_id].items():
+        response += f"🔸 **{coin_id.upper()}**\n"
+        for i, alert in enumerate(alerts, 1):
+            current_price = last_prices.get(coin_id, 'نامعلوم')
+            response += (
+                f"   {i}. {direction_emoji[alert['direction']]} "
+                f"درصد: {format_percent(alert['percent'])} "
+                f"| قیمت: {format_price(current_price)} "
+                f"| جهت: {direction_names[alert['direction']]}\n"
+            )
+        response += "\n"
+    
+    response += "💡 **حذف یک هشدار:**\n`/remove coin_id درصد جهت`\n"
+    response += "**مثال:** `/remove bitcoin 0.5 up`\n"
+    response += "**یا:** `/remove bitcoin 0.5` (بدون جهت)"
+    
+    await update.message.reply_text(
+        response,
+        reply_markup=get_main_keyboard() if user_id != ADMIN_ID else get_admin_keyboard()
+    )
 
 async def remove_monitor(update: Update, context: CallbackContext) -> None:
-    """حذف ارز از لیست مانیتورینگ"""
-    if not context.args:
-        await update.message.reply_text("❌ فرمت: `/remove bitcoin`")
+    """حذف یک هشدار خاص از لیست مانیتورینگ"""
+    if len(context.args) < 2 or len(context.args) > 3:
+        await update.message.reply_text(
+            "❌ فرمت: `/remove bitcoin 0.5` یا `/remove bitcoin 0.5 up`"
+        )
         return
     
     coin_id = context.args[0].lower()
+    try:
+        percent = float(context.args[1])
+    except ValueError:
+        await update.message.reply_text("❌ درصد باید یک عدد باشد.")
+        return
+    
+    # اگر جهت مشخص شده
+    direction = None
+    if len(context.args) == 3:
+        direction_input = context.args[2].lower()
+        if direction_input in ['up', 'down', 'both']:
+            direction = direction_input
+        else:
+            await update.message.reply_text("❌ جهت نامعتبر! از `up`، `down` یا `both` استفاده کنید.")
+            return
+    
     user_id = update.effective_user.id
     
-    if user_id in user_settings and coin_id in user_settings[user_id]:
-        del user_settings[user_id][coin_id]
-        if not any(coin_id in settings for settings in user_settings.values()):
-            last_prices.pop(coin_id, None)
-        
-        save_user_data()
-        await update.message.reply_text(
-            f"✅ ارز **{coin_id.upper()}** حذف شد.",
-            reply_markup=get_main_keyboard() if user_id != ADMIN_ID else get_admin_keyboard()
-        )
-    else:
+    if user_id not in user_settings or coin_id not in user_settings[user_id]:
         await update.message.reply_text("❌ این ارز در لیست شما نیست.")
+        return
+    
+    # پیدا کردن و حذف هشدار با درصد و جهت مشخص
+    alerts = user_settings[user_id][coin_id]
+    removed = False
+    
+    for i, alert in enumerate(alerts):
+        percent_match = abs(alert['percent'] - percent) < 0.0001
+        direction_match = True if direction is None else alert['direction'] == direction
+        
+        if percent_match and direction_match:
+            del alerts[i]
+            removed = True
+            break
+    
+    if not removed:
+        direction_text = f" با جهت {direction}" if direction else ""
+        await update.message.reply_text(
+            f"❌ هشدار با درصد {format_percent(percent)}{direction_text} برای {coin_id.upper()} یافت نشد."
+        )
+        return
+    
+    # اگر لیست هشدارها خالی شد، ارز را حذف کن
+    if not alerts:
+        del user_settings[user_id][coin_id]
+    
+    save_user_data()
+    
+    direction_names = {'up': 'صعودی', 'down': 'نزولی', 'both': 'هر دو'}
+    
+    await update.message.reply_text(
+        f"✅ هشدار با درصد {format_percent(percent)} و جهت {direction_names.get(direction, 'هر دو')} برای **{coin_id.upper()}** حذف شد.",
+        reply_markup=get_main_keyboard() if user_id != ADMIN_ID else get_admin_keyboard()
+    )
 
 async def help_command(update: Update, context: CallbackContext) -> None:
     """دستور راهنما"""
@@ -488,18 +611,21 @@ async def help_command(update: Update, context: CallbackContext) -> None:
 `/search bitcoin`
 
 🔹 **تنظیم مانیتور:**
-`/set bitcoin 0.5`
+`/set bitcoin 0.5` (هر دو جهت)
+`/set bitcoin 0.5 up` (فقط صعودی)
+`/set bitcoin 0.5 down` (فقط نزولی)
 
 🔹 **لیست:**
 `/list`
 
 🔹 **حذف:**
-`/remove bitcoin`
+`/remove bitcoin 0.5 up`
 
 📌 **نکات:**
 • حداقل درصد: 0.001%
 • بررسی هر 60 ثانیه
 • دقت 6 رقم اعشار
+• امکان تنظیم چندین هشدار برای یک ارز
     """
     await update.message.reply_text(help_text, 
                                    reply_markup=get_main_keyboard() if update.effective_user.id != ADMIN_ID else get_admin_keyboard())
@@ -513,14 +639,15 @@ async def admin_command(update: Update, context: CallbackContext) -> None:
         await update.message.reply_text("❌ شما دسترسی ادمین ندارید.")
 
 async def price_checker(context: CallbackContext) -> None:
-    """بررسی دوره‌ای قیمت‌ها و ارسال اعلان"""
+    """بررسی دوره‌ای قیمت‌ها و ارسال اعلان با در نظر گرفتن جهت"""
     if not user_settings:
         return
     
     try:
         coins_to_check = set()
         for user_id, coins in user_settings.items():
-            coins_to_check.update(coins.keys())
+            for coin_id in coins.keys():
+                coins_to_check.add(coin_id)
         
         if not coins_to_check:
             return
@@ -533,28 +660,51 @@ async def price_checker(context: CallbackContext) -> None:
             new_price = price_data['price']
             
             for user_id, coins in user_settings.items():
-                if coin_id in coins:
-                    settings = coins[coin_id]
-                    percent_threshold = settings['percent']
-                    user_last_price = settings['last_price']
+                if coin_id not in coins:
+                    continue
+                
+                # بررسی همه هشدارهای این ارز برای کاربر
+                for alert in coins[coin_id]:
+                    percent_threshold = alert['percent']
+                    user_last_price = alert['last_price']
+                    direction = alert.get('direction', 'both')
                     
                     price_change = ((new_price - user_last_price) / user_last_price) * 100
+                    abs_change = abs(price_change)
                     
-                    if abs(price_change) >= percent_threshold:
-                        direction = "📈 صعود" if price_change > 0 else "📉 نزول"
+                    # بررسی شرایط بر اساس جهت
+                    should_notify = False
+                    
+                    if direction == 'both':
+                        should_notify = abs_change >= percent_threshold
+                    elif direction == 'up':
+                        should_notify = price_change >= percent_threshold
+                    elif direction == 'down':
+                        should_notify = price_change <= -percent_threshold
+                    
+                    if should_notify:
+                        direction_emoji = "📈 صعود" if price_change > 0 else "📉 نزول"
+                        direction_names = {
+                            'up': 'فقط صعودی',
+                            'down': 'فقط نزولی',
+                            'both': 'هر دو جهت'
+                        }
+                        
                         message = (
                             f"🚨 **هشدار تغییر قیمت!**\n\n"
                             f"🔸 ارز: {coin_id.upper()}\n"
-                            f"🔸 جهت: {direction}\n"
+                            f"🔸 جهت: {direction_emoji}\n"
                             f"🔸 تغییر: {price_change:+.4f}%\n"
                             f"🔸 قبلی: {format_price(user_last_price)}\n"
                             f"🔸 جدید: {format_price(new_price)}\n"
-                            f"🔸 آستانه: {format_percent(percent_threshold)}"
+                            f"🔸 آستانه: {format_percent(percent_threshold)}\n"
+                            f"🔸 نوع هشدار: {direction_names[direction]}"
                         )
                         
                         try:
                             await context.bot.send_message(chat_id=user_id, text=message)
-                            user_settings[user_id][coin_id]['last_price'] = new_price
+                            # به‌روزرسانی قیمت آخر برای این هشدار
+                            alert['last_price'] = new_price
                             save_user_data()
                         except Exception as e:
                             logger.error(f"Error sending notification to {user_id}: {e}")
@@ -563,6 +713,13 @@ async def price_checker(context: CallbackContext) -> None:
         
     except Exception as e:
         logger.error(f"Error in price checker: {e}")
+
+async def cancel_broadcast(update: Update, context: CallbackContext) -> None:
+    """لغو ارسال همگانی"""
+    user_id = update.effective_user.id
+    if user_id == ADMIN_ID and admin_broadcast_mode.get(user_id, False):
+        admin_broadcast_mode[user_id] = False
+        await update.message.reply_text("❌ ارسال همگانی لغو شد.", reply_markup=get_admin_keyboard())
 
 def main() -> None:
     """تابع اصلی"""
@@ -578,6 +735,7 @@ def main() -> None:
     application.add_handler(CommandHandler("remove", remove_monitor))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("cancel", cancel_broadcast))
     
     # کالبک‌های منو
     application.add_handler(CallbackQueryHandler(button_callback))
@@ -589,8 +747,9 @@ def main() -> None:
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(price_checker, interval=60, first=10)
+        logger.info("✅ Price checker scheduled!")
     else:
-        logger.warning("Job queue is not available. Price checker will not run.")
+        logger.warning("⚠️ Job queue is not available!")
     
     logger.info("🚀 Bot started successfully!")
     application.run_polling()
